@@ -10,7 +10,7 @@ use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
@@ -31,7 +31,11 @@ pub struct KdfParams {
 
 impl KdfParams {
     pub fn default_strong() -> Self {
-        KdfParams { memory_kib: MEM_KIB, iterations: ITERATIONS, parallelism: PARALLELISM }
+        KdfParams {
+            memory_kib: MEM_KIB,
+            iterations: ITERATIONS,
+            parallelism: PARALLELISM,
+        }
     }
 }
 
@@ -52,7 +56,11 @@ fn validate_params(p: &KdfParams) -> Result<(), String> {
     let ok = (19_456..=1_048_576).contains(&p.memory_kib)
         && (2..=20).contains(&p.iterations)
         && (1..=16).contains(&p.parallelism);
-    if ok { Ok(()) } else { Err("unsafe or unsupported KDF parameters in wallet file".into()) }
+    if ok {
+        Ok(())
+    } else {
+        Err("unsafe or unsupported KDF parameters in wallet file".into())
+    }
 }
 
 /// Random bytes straight from the OS.
@@ -65,7 +73,9 @@ pub fn random_bytes<const N: usize>() -> Result<[u8; N], String> {
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 32
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 pub fn wallet_dir() -> Result<PathBuf, String> {
@@ -122,7 +132,12 @@ pub fn save(name: &str, password: &str, mnemonic: &Mnemonic) -> Result<(), Strin
 }
 
 /// Encrypt entropy with the password and write the wallet file atomically.
-pub fn save_with(name: &str, password: &str, mnemonic: &Mnemonic, params: KdfParams) -> Result<(), String> {
+pub fn save_with(
+    name: &str,
+    password: &str,
+    mnemonic: &Mnemonic,
+    params: KdfParams,
+) -> Result<(), String> {
     let path = wallet_path(name)?;
     if path.exists() {
         return Err("A wallet with that name already exists".into());
@@ -135,7 +150,13 @@ pub fn save_with(name: &str, password: &str, mnemonic: &Mnemonic, params: KdfPar
 
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_ref()));
     let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce), Payload { msg: entropy.as_slice(), aad: AAD })
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: entropy.as_slice(),
+                aad: AAD,
+            },
+        )
         .map_err(|_| "encryption failed".to_string())?;
 
     let ks = Keystore {
@@ -151,9 +172,9 @@ pub fn save_with(name: &str, password: &str, mnemonic: &Mnemonic, params: KdfPar
     let json = serde_json::to_vec_pretty(&ks).map_err(|e| e.to_string())?;
 
     // Temp file (0600) -> fsync -> rename -> fsync directory, so a crash can't corrupt the wallet.
-    let tmp = path.with_extension("tmp");
-    let _ = fs::remove_file(&tmp);
-    {
+    // A random suffix keeps concurrent saves from clobbering each other's temp file.
+    let tmp = path.with_extension(format!("{}.tmp", hex::encode(random_bytes::<8>()?)));
+    let written = (|| -> Result<(), String> {
         let mut f = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -162,8 +183,16 @@ pub fn save_with(name: &str, password: &str, mnemonic: &Mnemonic, params: KdfPar
             .map_err(|e| e.to_string())?;
         f.write_all(&json).map_err(|e| e.to_string())?;
         f.sync_all().map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+    if let Err(e) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
     }
-    fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    if let Err(e) = fs::rename(&tmp, &path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
     if let Some(dir) = path.parent() {
         if let Ok(d) = File::open(dir) {
             let _ = d.sync_all();
@@ -172,28 +201,45 @@ pub fn save_with(name: &str, password: &str, mnemonic: &Mnemonic, params: KdfPar
     Ok(())
 }
 
-/// Refuse symlinks and oversized files; tighten loose permissions.
-fn check_file(path: &Path) -> Result<(), String> {
-    let meta = fs::symlink_metadata(path).map_err(|e| format!("cannot read wallet: {e}"))?;
-    if meta.file_type().is_symlink() || !meta.is_file() {
+/// Open, validate and read the wallet in one step. `O_NOFOLLOW` (and `O_NONBLOCK`
+/// so a planted FIFO cannot hang us) means the checks and the read act on the same
+/// file descriptor, closing the old check/read race.
+fn read_wallet_file(path: &Path) -> Result<Vec<u8>, String> {
+    let f = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| format!("cannot read wallet: {e}"))?;
+    let meta = f
+        .metadata()
+        .map_err(|e| format!("cannot read wallet: {e}"))?;
+    if !meta.is_file() {
         return Err("wallet path is not a regular file".into());
     }
     if meta.len() > MAX_FILE_BYTES {
         return Err("wallet file is unexpectedly large".into());
     }
     if meta.permissions().mode() & 0o077 != 0 {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+        f.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
     }
-    Ok(())
+    let mut data = Vec::new();
+    f.take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut data)
+        .map_err(|e| format!("cannot read wallet: {e}"))?;
+    if data.len() as u64 > MAX_FILE_BYTES {
+        return Err("wallet file is unexpectedly large".into());
+    }
+    Ok(data)
 }
 
 /// Decrypt a wallet. Returns the mnemonic and its fingerprint.
 /// Wrong password and tampered file produce the same generic error.
 pub fn open(name: &str, password: &str) -> Result<(Mnemonic, String), String> {
     let path = wallet_path(name)?;
-    check_file(&path)?;
-    let data = fs::read(&path).map_err(|e| format!("cannot read wallet: {e}"))?;
-    let ks: Keystore = serde_json::from_slice(&data).map_err(|_| "corrupt wallet file".to_string())?;
+    let data = read_wallet_file(&path)?;
+    let ks: Keystore =
+        serde_json::from_slice(&data).map_err(|_| "corrupt wallet file".to_string())?;
     if ks.version != 1 || ks.kdf != "argon2id" || ks.network != "testnet" {
         return Err("unsupported wallet version or network".into());
     }
@@ -227,7 +273,11 @@ mod tests {
     use super::*;
 
     fn fast() -> KdfParams {
-        KdfParams { memory_kib: 19_456, iterations: 2, parallelism: 1 }
+        KdfParams {
+            memory_kib: 19_456,
+            iterations: 2,
+            parallelism: 1,
+        }
     }
 
     #[test]
@@ -243,7 +293,10 @@ mod tests {
         assert_eq!(fp, fingerprint(&m).unwrap());
 
         assert!(open("t1", "a totally wrong password").is_err());
-        assert!(save_with("t1", pw, &m, fast()).is_err(), "must not overwrite existing wallet");
+        assert!(
+            save_with("t1", pw, &m, fast()).is_err(),
+            "must not overwrite existing wallet"
+        );
 
         // Flip one hex digit of the ciphertext: must fail authentication.
         let path = wallet_path("t1").unwrap();
@@ -255,9 +308,31 @@ mod tests {
         assert!(open("t1", pw).is_err(), "tampered file must be rejected");
 
         // A file that tries to weaken the KDF must be rejected before any work is done.
-        ks.kdf_params = KdfParams { memory_kib: 8, iterations: 1, parallelism: 1 };
+        ks.kdf_params = KdfParams {
+            memory_kib: 8,
+            iterations: 1,
+            parallelism: 1,
+        };
         fs::write(&path, serde_json::to_vec(&ks).unwrap()).unwrap();
-        assert!(open("t1", pw).is_err(), "weakened KDF params must be rejected");
+        assert!(
+            open("t1", pw).is_err(),
+            "weakened KDF params must be rejected"
+        );
+
+        // Symlinks and oversized files must be refused.
+        let dir_path = wallet_dir().unwrap();
+        let link = dir_path.join("link.cairn");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(
+            open("link", pw).is_err(),
+            "symlinked wallet must be rejected"
+        );
+        let big = dir_path.join("big.cairn");
+        fs::write(&big, vec![b'x'; MAX_FILE_BYTES as usize + 1]).unwrap();
+        assert!(
+            open("big", pw).is_err(),
+            "oversized wallet must be rejected"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -265,9 +340,24 @@ mod tests {
     #[test]
     fn kdf_param_limits() {
         assert!(validate_params(&KdfParams::default_strong()).is_ok());
-        assert!(validate_params(&KdfParams { memory_kib: 4_194_304, iterations: 3, parallelism: 1 }).is_err());
-        assert!(validate_params(&KdfParams { memory_kib: 262_144, iterations: 1, parallelism: 1 }).is_err());
-        assert!(validate_params(&KdfParams { memory_kib: 262_144, iterations: 3, parallelism: 0 }).is_err());
+        assert!(validate_params(&KdfParams {
+            memory_kib: 4_194_304,
+            iterations: 3,
+            parallelism: 1
+        })
+        .is_err());
+        assert!(validate_params(&KdfParams {
+            memory_kib: 262_144,
+            iterations: 1,
+            parallelism: 1
+        })
+        .is_err());
+        assert!(validate_params(&KdfParams {
+            memory_kib: 262_144,
+            iterations: 3,
+            parallelism: 0
+        })
+        .is_err());
     }
 
     #[test]
@@ -279,4 +369,3 @@ mod tests {
         assert!(!valid_name(&"x".repeat(33)));
     }
 }
-

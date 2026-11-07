@@ -22,7 +22,10 @@ pub fn banner() {
         style("◆ CAIRN").cyan().bold(),
         style(" TESTNET ").black().on_yellow()
     );
-    println!("{}\n", style("experimental · unaudited · no real funds").dim());
+    println!(
+        "{}\n",
+        style("experimental · unaudited · no real funds").dim()
+    );
 }
 
 pub fn ok(msg: &str) {
@@ -58,7 +61,11 @@ pub fn spin<T>(msg: &str, f: impl FnOnce() -> T) -> T {
             let term = Term::stdout();
             let mut i = 0usize;
             while !done.load(Ordering::Relaxed) {
-                let _ = term.write_str(&format!("\r{} {}", style(frames[i % frames.len()]).cyan(), style(msg).dim()));
+                let _ = term.write_str(&format!(
+                    "\r{} {}",
+                    style(frames[i % frames.len()]).cyan(),
+                    style(msg).dim()
+                ));
                 i += 1;
                 std::thread::sleep(Duration::from_millis(80));
             }
@@ -74,7 +81,12 @@ pub fn spin<T>(msg: &str, f: impl FnOnce() -> T) -> T {
 
 /// Rounded box around lines (ANSI-aware width).
 pub fn boxed(lines: &[String]) {
-    let w = lines.iter().map(|l| measure_text_width(l)).max().unwrap_or(0).max(30);
+    let w = lines
+        .iter()
+        .map(|l| measure_text_width(l))
+        .max()
+        .unwrap_or(0)
+        .max(30);
     println!("╭{}╮", "─".repeat(w + 2));
     for l in lines {
         println!("│ {}{} │", l, " ".repeat(w - measure_text_width(l)));
@@ -105,4 +117,3 @@ pub fn short(s: &str) -> String {
         s.to_string()
     }
 }
-

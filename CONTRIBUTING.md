@@ -26,7 +26,7 @@ cargo audit
 
 - Keep them small and focused, and explain the why.
 - Describe how you tested (and on which platform, for example Termux or Linux).
-- Security-sensitive changes (`keystore.rs`, `wallet.rs`, `send.rs`, `esplora.rs`) get extra review.
+- Security-sensitive changes (`keystore.rs`, `wallet.rs`, `send.rs`, `offline.rs`, `qr.rs`, `esplora.rs`) get extra review.
 
 ## Reporting security issues
 

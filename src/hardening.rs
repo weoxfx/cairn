@@ -4,7 +4,10 @@
 pub fn init() {
     #[cfg(unix)]
     unsafe {
-        let zero = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        let zero = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         libc::setrlimit(libc::RLIMIT_CORE, &zero);
         libc::umask(0o077);
         #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -19,4 +22,3 @@ pub fn init() {
         }
     }
 }
-

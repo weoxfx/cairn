@@ -3,17 +3,19 @@
 
 use crate::esplora::{self, Utxo, WalletState};
 use crate::ui::{banner, boxed, fail, fmt_btc, menu, ok, pause, spin, theme};
-use crate::wallet::{Signer, Watch};
+use crate::wallet::{derivation_path, Signer, Watch};
 use crate::{keystore, NETWORK};
 use bitcoin::absolute::LockTime;
 use bitcoin::address::NetworkUnchecked;
+use bitcoin::bip32::{DerivationPath, Fingerprint};
 use bitcoin::ecdsa::Signature;
+use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{Message, Secp256k1};
 use bitcoin::sighash::SighashCache;
 use bitcoin::transaction::Version;
 use bitcoin::{
-    Address, Amount, CompressedPublicKey, Denomination, EcdsaSighashType, OutPoint, ScriptBuf, Sequence,
-    Transaction, TxIn, TxOut, Witness,
+    Address, Amount, CompressedPublicKey, Denomination, EcdsaSighashType, OutPoint, ScriptBuf,
+    Sequence, Transaction, TxIn, TxOut, Witness,
 };
 use console::style;
 use dialoguer::{Input, Password};
@@ -42,7 +44,9 @@ pub fn parse_amount(s: &str) -> Result<Option<u64>, String> {
         return Ok(None);
     }
     let sats = if let Some(n) = t.strip_suffix("sats").or_else(|| t.strip_suffix("sat")) {
-        n.trim().parse::<u64>().map_err(|_| "Enter a whole number of sats".to_string())?
+        n.trim()
+            .parse::<u64>()
+            .map_err(|_| "Enter a whole number of sats".to_string())?
     } else {
         Amount::from_str_in(&t, Denomination::Bitcoin)
             .map_err(|e| format!("Invalid amount: {e}"))?
@@ -81,7 +85,7 @@ pub fn plan(
     rate: f64,
     change_addr: Address,
 ) -> Result<Plan, String> {
-    utxos.sort_by(|a, b| b.value.cmp(&a.value));
+    utxos.sort_by_key(|a| std::cmp::Reverse(a.value));
     match amount {
         None => {
             let total: u64 = utxos.iter().map(|u| u.value).sum();
@@ -89,7 +93,14 @@ pub fn plan(
             if utxos.is_empty() || total < fee + DUST {
                 return Err("Balance is too small to cover the fee".into());
             }
-            Ok(Plan { inputs: utxos, to, amount: total - fee, fee, change: None, rate })
+            Ok(Plan {
+                inputs: utxos,
+                to,
+                amount: total - fee,
+                fee,
+                change: None,
+                rate,
+            })
         }
         Some(amt) => {
             if amt < DUST {
@@ -104,10 +115,24 @@ pub fn plan(
                 let fee_plain = fee_for(rate, vsize(sel.len(), 1));
                 if sum >= amt + fee_change && sum - amt - fee_change >= DUST {
                     let change = sum - amt - fee_change;
-                    return Ok(Plan { inputs: sel, to, amount: amt, fee: fee_change, change: Some((change_addr, change)), rate });
+                    return Ok(Plan {
+                        inputs: sel,
+                        to,
+                        amount: amt,
+                        fee: fee_change,
+                        change: Some((change_addr, change)),
+                        rate,
+                    });
                 }
                 if sum >= amt + fee_plain {
-                    return Ok(Plan { inputs: sel, to, amount: amt, fee: sum - amt, change: None, rate });
+                    return Ok(Plan {
+                        inputs: sel,
+                        to,
+                        amount: amt,
+                        fee: sum - amt,
+                        change: None,
+                        rate,
+                    });
                 }
             }
             Err("Not enough confirmed funds for this amount plus the fee".into())
@@ -117,22 +142,77 @@ pub fn plan(
 
 // ---------- building + signing ----------
 
-fn build_tx(p: &Plan) -> Transaction {
+pub fn build_tx(p: &Plan) -> Transaction {
     let input = p
         .inputs
         .iter()
         .map(|u| TxIn {
-            previous_output: OutPoint { txid: u.txid, vout: u.vout },
+            previous_output: OutPoint {
+                txid: u.txid,
+                vout: u.vout,
+            },
             script_sig: ScriptBuf::new(),
             sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
             witness: Witness::new(),
         })
         .collect();
-    let mut output = vec![TxOut { value: Amount::from_sat(p.amount), script_pubkey: p.to.script_pubkey() }];
+    let mut output = vec![TxOut {
+        value: Amount::from_sat(p.amount),
+        script_pubkey: p.to.script_pubkey(),
+    }];
     if let Some((addr, v)) = &p.change {
-        output.push(TxOut { value: Amount::from_sat(*v), script_pubkey: addr.script_pubkey() });
+        output.push(TxOut {
+            value: Amount::from_sat(*v),
+            script_pubkey: addr.script_pubkey(),
+        });
     }
-    Transaction { version: Version::TWO, lock_time: LockTime::ZERO, input, output }
+    Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input,
+        output,
+    }
+}
+
+/// Address -> (chain, index) for every address the wallet may have used.
+pub fn keymap(watch: &Watch, state: &WalletState) -> Result<HashMap<String, (u32, u32)>, String> {
+    let mut map = HashMap::new();
+    for (chain, count) in [(0u32, state.next_receive), (1u32, state.next_change)] {
+        if count > 0 {
+            for (i, a) in watch.addresses(chain, 0, count)?.into_iter().enumerate() {
+                map.insert(a, (chain, i as u32));
+            }
+        }
+    }
+    Ok(map)
+}
+
+/// Unsigned PSBT with the UTXO and BIP174 key origin for every input.
+pub fn build_psbt(
+    p: &Plan,
+    watch: &Watch,
+    keymap: &HashMap<String, (u32, u32)>,
+    master_fp: Fingerprint,
+) -> Result<Psbt, String> {
+    let mut psbt = Psbt::from_unsigned_tx(build_tx(p)).map_err(|e| e.to_string())?;
+    for (i, u) in p.inputs.iter().enumerate() {
+        let (chain, index) = *keymap
+            .get(&u.address)
+            .ok_or("coin belongs to an unknown address")?;
+        let path: DerivationPath = derivation_path(NETWORK, chain, index)
+            .parse()
+            .map_err(|e: bitcoin::bip32::Error| e.to_string())?;
+        let input = &mut psbt.inputs[i];
+        input.witness_utxo = Some(TxOut {
+            value: Amount::from_sat(u.value),
+            script_pubkey: parse_address(&u.address)?.script_pubkey(),
+        });
+        input
+            .bip32_derivation
+            .insert(watch.pubkey_at(chain, index)?, (master_fp, path));
+        input.sighash_type = Some(EcdsaSighashType::All.into());
+    }
+    Ok(psbt)
 }
 
 /// Sign every input. `keymap` maps our address -> (chain, index).
@@ -145,7 +225,9 @@ pub fn sign(
     let secp = Secp256k1::new();
     let mut cache = SighashCache::new(&mut *tx);
     for (i, u) in p.inputs.iter().enumerate() {
-        let (chain, idx) = keymap.get(&u.address).ok_or("coin belongs to an unknown address")?;
+        let (chain, idx) = keymap
+            .get(&u.address)
+            .ok_or("coin belongs to an unknown address")?;
         let (sk, pk) = signer.key_at(*chain, *idx)?;
         let spk = parse_address(&u.address)?.script_pubkey();
         // The key we derived must really be the one that locks this coin.
@@ -157,7 +239,10 @@ pub fn sign(
             .p2wpkh_signature_hash(i, &spk, Amount::from_sat(u.value), EcdsaSighashType::All)
             .map_err(|e| e.to_string())?;
         let sig = secp.sign_ecdsa(&Message::from(sighash), &sk);
-        let signature = Signature { signature: sig, sighash_type: EcdsaSighashType::All };
+        let signature = Signature {
+            signature: sig,
+            sighash_type: EcdsaSighashType::All,
+        };
         *cache.witness_mut(i).ok_or("witness slot missing")? = Witness::p2wpkh(&signature, &pk);
     }
     Ok(())
@@ -166,7 +251,59 @@ pub fn sign(
 // ---------- the interactive flow ----------
 
 fn pct(fee: u64, amount: u64) -> f64 {
-    if amount == 0 { 0.0 } else { fee as f64 * 100.0 / amount as f64 }
+    if amount == 0 {
+        0.0
+    } else {
+        fee as f64 * 100.0 / amount as f64
+    }
+}
+
+/// Show the standard transaction review box. Used by the online send flow and
+/// by offline PSBT creation (which uses the same [`Plan`]).
+pub fn review(p: &Plan) {
+    banner();
+    println!("{}\n", style("Review transaction").bold());
+    println!("  {}", style("To").dim());
+    println!("  {}\n", style(p.to.to_string()).cyan().bold());
+    let mut lines = vec![
+        format!(
+            "{:<8}{} tBTC",
+            "Amount",
+            style(fmt_btc(p.amount as i64)).bold()
+        ),
+        format!("{:<8}{} tBTC", "Fee", fmt_btc(p.fee as i64)),
+        format!("{:<8}{:.1} sat/vB, {} coin(s)", "", p.rate, p.inputs.len()),
+    ];
+    if let Some((_, v)) = &p.change {
+        lines.push(format!(
+            "{:<8}{} tBTC (back to you)",
+            "Change",
+            fmt_btc(*v as i64)
+        ));
+    } else {
+        lines.push(format!("{:<8}none", "Change"));
+    }
+    lines.push(format!(
+        "{:<8}{} tBTC",
+        "Total",
+        style(fmt_btc((p.amount + p.fee) as i64)).yellow().bold()
+    ));
+    boxed(&lines);
+    if pct(p.fee, p.amount) > 5.0 {
+        println!(
+            "{}",
+            style(format!(
+                "\n  ⚠ Fee is {:.1}% of the amount.",
+                pct(p.fee, p.amount)
+            ))
+            .yellow()
+            .bold()
+        );
+    }
+    println!(
+        "\n{}",
+        style("  Check the address character by character. Sends cannot be undone.").dim()
+    );
 }
 
 /// Returns Ok(true) if a transaction was broadcast.
@@ -176,7 +313,10 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
     if state.confirmed <= 0 {
         return Err("No confirmed funds to send yet. Wait for confirmations, then Refresh.".into());
     }
-    println!("Available (confirmed): {} tBTC\n", style(fmt_btc(state.confirmed)).green());
+    println!(
+        "Available (confirmed): {} tBTC\n",
+        style(fmt_btc(state.confirmed)).green()
+    );
 
     let to_str: String = Input::with_theme(&theme())
         .with_prompt("Recipient address")
@@ -194,15 +334,13 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
 
     // Our coins, and fee estimates.
     let loaded = spin("Loading your coins and fees…", || -> Result<_, String> {
-        let mut keymap: HashMap<String, (u32, u32)> = HashMap::new();
-        for (chain, count) in [(0u32, state.next_receive), (1u32, state.next_change)] {
-            if count > 0 {
-                for (i, a) in watch.addresses(chain, 0, count)?.into_iter().enumerate() {
-                    keymap.insert(a, (chain, i as u32));
-                }
-            }
-        }
-        let addrs: Vec<String> = state.used.iter().filter(|a| keymap.contains_key(*a)).cloned().collect();
+        let keymap = keymap(watch, state)?;
+        let addrs: Vec<String> = state
+            .used
+            .iter()
+            .filter(|a| keymap.contains_key(*a))
+            .cloned()
+            .collect();
         let utxos = esplora::utxos_for(&addrs)?;
         Ok((utxos, keymap, esplora::fee_rates().ok()))
     })?;
@@ -216,9 +354,21 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
     let rate: f64 = match rates {
         Some(r) => {
             let items = [
-                format!("Slow    {:.1} sat/vB  (~{} sats)", r.slow, fee_for(r.slow, TYPICAL_VBYTES)),
-                format!("Normal  {:.1} sat/vB  (~{} sats)", r.normal, fee_for(r.normal, TYPICAL_VBYTES)),
-                format!("Fast    {:.1} sat/vB  (~{} sats)", r.fast, fee_for(r.fast, TYPICAL_VBYTES)),
+                format!(
+                    "Slow    {:.1} sat/vB  (~{} sats)",
+                    r.slow,
+                    fee_for(r.slow, TYPICAL_VBYTES)
+                ),
+                format!(
+                    "Normal  {:.1} sat/vB  (~{} sats)",
+                    r.normal,
+                    fee_for(r.normal, TYPICAL_VBYTES)
+                ),
+                format!(
+                    "Fast    {:.1} sat/vB  (~{} sats)",
+                    r.fast,
+                    fee_for(r.fast, TYPICAL_VBYTES)
+                ),
             ];
             let refs: Vec<&str> = items.iter().map(|s| s.as_str()).collect();
             match menu(&refs)? {
@@ -231,7 +381,11 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
             .with_prompt("Fee rate in sat/vB (estimates unavailable)")
             .default(2.0f64)
             .validate_with(|v: &f64| -> Result<(), &str> {
-                if *v >= 1.0 && *v <= 1000.0 { Ok(()) } else { Err("Enter a value from 1 to 1000") }
+                if *v >= 1.0 && *v <= 1000.0 {
+                    Ok(())
+                } else {
+                    Err("Enter a value from 1 to 1000")
+                }
             })
             .interact_text()
             .map_err(|e| e.to_string())?,
@@ -248,26 +402,7 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
     }
 
     // Review screen.
-    banner();
-    println!("{}\n", style("Review transaction").bold());
-    println!("  {}", style("To").dim());
-    println!("  {}\n", style(p.to.to_string()).cyan().bold());
-    let mut lines = vec![
-        format!("{:<8}{} tBTC", "Amount", style(fmt_btc(p.amount as i64)).bold()),
-        format!("{:<8}{} tBTC", "Fee", fmt_btc(p.fee as i64)),
-        format!("{:<8}{:.1} sat/vB, {} coin(s)", "", p.rate, p.inputs.len()),
-    ];
-    if let Some((_, v)) = &p.change {
-        lines.push(format!("{:<8}{} tBTC (back to you)", "Change", fmt_btc(*v as i64)));
-    } else {
-        lines.push(format!("{:<8}none", "Change"));
-    }
-    lines.push(format!("{:<8}{} tBTC", "Total", style(fmt_btc((p.amount + p.fee) as i64)).yellow().bold()));
-    boxed(&lines);
-    if pct(p.fee, p.amount) > 5.0 {
-        println!("{}", style(format!("\n  ⚠ Fee is {:.1}% of the amount.", pct(p.fee, p.amount))).yellow().bold());
-    }
-    println!("\n{}", style("  Check the address character by character. Sends cannot be undone.").dim());
+    review(&p);
 
     let confirm: String = Input::with_theme(&theme())
         .with_prompt("Type SEND to confirm (anything else cancels)")
@@ -306,7 +441,7 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
         }
     }
     let signer = signer.ok_or("Wrong password. Nothing was sent.")?;
-    if signer.account_xpub() != watch.xpub_string() {
+    if signer.account_xpub()? != watch.xpub_string() {
         return Err("Keys do not match this wallet session. Nothing was sent.".into());
     }
 
@@ -326,7 +461,13 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
             println!("\n  {}", style("Transaction ID").dim());
             println!("  {}\n", style(&txid).cyan());
             if server_txid != txid {
-                println!("{}", style(format!("  Note: server reported a different id: {server_txid}")).yellow());
+                println!(
+                    "{}",
+                    style(format!(
+                        "  Note: server reported a different id: {server_txid}"
+                    ))
+                    .yellow()
+                );
             }
             println!("  It's pending until confirmed. Use Refresh to follow it.\n");
             pause();
@@ -348,7 +489,12 @@ mod tests {
         "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
     fn utxo(value: u64, addr: &str) -> Utxo {
-        Utxo { txid: Txid::from_byte_array([1u8; 32]), vout: 0, value, address: addr.to_string() }
+        Utxo {
+            txid: Txid::from_byte_array([1u8; 32]),
+            vout: 0,
+            value,
+            address: addr.to_string(),
+        }
     }
 
     fn addrs() -> (String, Address, Address, Watch) {
@@ -375,7 +521,10 @@ mod tests {
     fn address_validation() {
         let (a0, _, _, _) = addrs();
         assert!(parse_address(&a0).is_ok());
-        assert!(parse_address("bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu").is_err(), "mainnet must be rejected");
+        assert!(
+            parse_address("bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu").is_err(),
+            "mainnet must be rejected"
+        );
         assert!(parse_address("tb1qnotanaddress").is_err());
         assert!(parse_address("").is_err());
     }
@@ -392,13 +541,34 @@ mod tests {
     #[test]
     fn plan_max_and_insufficient_and_dust() {
         let (a0, to, change, _) = addrs();
-        let p = plan(vec![utxo(100_000, &a0)], to.clone(), None, 1.0, change.clone()).unwrap();
+        let p = plan(
+            vec![utxo(100_000, &a0)],
+            to.clone(),
+            None,
+            1.0,
+            change.clone(),
+        )
+        .unwrap();
         assert_eq!(p.fee, 110);
         assert_eq!(p.amount, 99_890);
         assert!(p.change.is_none());
 
-        assert!(plan(vec![utxo(1_000, &a0)], to.clone(), Some(50_000), 1.0, change.clone()).is_err());
-        assert!(plan(vec![utxo(100_000, &a0)], to.clone(), Some(100), 1.0, change.clone()).is_err());
+        assert!(plan(
+            vec![utxo(1_000, &a0)],
+            to.clone(),
+            Some(50_000),
+            1.0,
+            change.clone()
+        )
+        .is_err());
+        assert!(plan(
+            vec![utxo(100_000, &a0)],
+            to.clone(),
+            Some(100),
+            1.0,
+            change.clone()
+        )
+        .is_err());
 
         // Change would be dust: it is added to the fee instead.
         let p = plan(vec![utxo(30_300, &a0)], to, Some(30_000), 1.0, change).unwrap();
@@ -430,7 +600,8 @@ mod tests {
         let h = cache
             .p2wpkh_signature_hash(0, &spk, Amount::from_sat(100_000), EcdsaSighashType::All)
             .unwrap();
-        secp.verify_ecdsa(&Message::from(h), &sig.signature, &pk).unwrap();
+        secp.verify_ecdsa(&Message::from(h), &sig.signature, &pk)
+            .unwrap();
 
         // A wrong key map must be refused.
         let mut bad = HashMap::new();
@@ -439,4 +610,3 @@ mod tests {
         assert!(sign(&mut tx2, &p, &signer, &bad).is_err());
     }
 }
-

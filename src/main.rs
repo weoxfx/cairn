@@ -1,6 +1,8 @@
 mod esplora;
 mod hardening;
 mod keystore;
+mod offline;
+mod qr;
 mod send;
 mod ui;
 mod wallet;
@@ -15,6 +17,8 @@ use ui::{banner, boxed, clear, fail, fmt_btc, menu, ok, pause, short, spin, them
 use wallet::Watch;
 use zeroize::Zeroizing;
 
+// All supported nets (testnet3/4, signet) share the test network kind: tb1
+// addresses, tpub keys and coin type 1. `esplora::Net` only picks the server.
 const NETWORK: Network = Network::Testnet;
 const MIN_PASSWORD_LEN: usize = 12;
 const IDLE_LOCK: Duration = Duration::from_secs(300);
@@ -22,10 +26,115 @@ const IDLE_LOCK: Duration = Duration::from_secs(300);
 fn main() {
     hardening::init();
     esplora::load_config();
+    let interactive = std::env::args().nth(1).is_none();
+    if let Err(e) = run() {
+        println!();
+        fail(&e);
+        pause();
+        std::process::exit(1);
+    }
+    if interactive {
+        clear();
+    }
+}
+
+fn run() -> Result<(), String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let Some(cmd) = args.first() else {
+        return interactive();
+    };
+    match cmd.as_str() {
+        "-h" | "--help" => {
+            help();
+            Ok(())
+        }
+        "--create-psbt" => {
+            let (pos, out) = parse_args(&args[1..])?;
+            if pos.len() > 1 {
+                return Err("usage: cairn --create-psbt [WALLET] [--out FILE]".into());
+            }
+            offline::create_psbt(pos.first().cloned(), out)
+        }
+        "--offline" => {
+            let (pos, out) = parse_args(&args[1..])?;
+            if pos.len() != 1 {
+                return Err("usage: cairn --offline <UNSIGNED.psbt> [--out SIGNED.psbt]".into());
+            }
+            offline::sign_psbt(pos[0].clone(), out)
+        }
+        "--broadcast" => {
+            let (pos, out) = parse_args(&args[1..])?;
+            if out.is_some() || pos.len() != 2 {
+                return Err("usage: cairn --broadcast <UNSIGNED.psbt> <SIGNED.psbt>".into());
+            }
+            offline::broadcast(pos[0].clone(), pos[1].clone())
+        }
+        "--qr-show" => {
+            let (pos, out) = parse_args(&args[1..])?;
+            if out.is_some() || pos.len() != 1 {
+                return Err("usage: cairn --qr-show <FILE.psbt>".into());
+            }
+            offline::show_qr(pos[0].clone())
+        }
+        "--qr-scan" => {
+            let (pos, out) = parse_args(&args[1..])?;
+            if pos.is_empty() {
+                return Err("usage: cairn --qr-scan [--out FILE.psbt] <IMAGE>...".into());
+            }
+            offline::scan_qr(pos, out)
+        }
+        other => Err(format!("unknown option '{other}' (try cairn --help)")),
+    }
+}
+
+fn parse_args(args: &[String]) -> Result<(Vec<String>, Option<String>), String> {
+    let mut pos = vec![];
+    let mut out = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--out" | "-o" => {
+                i += 1;
+                out = Some(args.get(i).ok_or("--out needs a file path")?.clone());
+            }
+            s if s.starts_with('-') => return Err(format!("unknown option '{s}'")),
+            s => pos.push(s.to_string()),
+        }
+        i += 1;
+    }
+    Ok((pos, out))
+}
+
+fn help() {
+    println!(
+        "\
+Cairn - experimental testnet Bitcoin wallet
+
+Usage:
+  cairn                                      Interactive wallet
+  cairn --create-psbt [WALLET] [--out FILE]  Build an unsigned PSBT (online)
+  cairn --offline <UNSIGNED.psbt> [--out SIGNED.psbt]
+                                             Verify and sign a PSBT (offline)
+  cairn --broadcast <UNSIGNED.psbt> <SIGNED.psbt>
+                                             Broadcast a signed PSBT (online)
+  cairn --qr-show <FILE.psbt>                Show a PSBT as QR frame(s)
+  cairn --qr-scan [--out FILE.psbt] <IMAGE>...
+                                             Rebuild a PSBT from QR photos
+  cairn --help                               Show this help"
+    );
+}
+
+fn interactive() -> Result<(), String> {
     loop {
         banner();
-        let choice = menu(&["Create New Wallet", "Open Existing Wallet", "Import Wallet (seed phrase)", "Settings", "Exit"])
-            .unwrap_or(4);
+        let choice = menu(&[
+            "Create New Wallet",
+            "Open Existing Wallet",
+            "Import Wallet (seed phrase)",
+            "Settings",
+            "Exit",
+        ])
+        .unwrap_or(4);
         let result = match choice {
             0 => create_wallet(),
             1 => open_wallet(),
@@ -39,7 +148,7 @@ fn main() {
             pause();
         }
     }
-    clear();
+    Ok(())
 }
 
 // ---------- input ----------
@@ -57,12 +166,20 @@ fn ask_name() -> Result<String, String> {
 
 fn weak_password(pw: &str) -> Option<String> {
     let lower = pw.to_lowercase();
-    let common = ["password1234", "123456789012", "qwertyuiop12", "iloveyou1234", "letmein12345"];
+    let common = [
+        "password1234",
+        "123456789012",
+        "qwertyuiop12",
+        "iloveyou1234",
+        "letmein12345",
+    ];
     let mut uniq: Vec<char> = pw.chars().collect();
     uniq.sort();
     uniq.dedup();
     if pw.chars().count() < MIN_PASSWORD_LEN {
-        Some(format!("Password must be at least {MIN_PASSWORD_LEN} characters"))
+        Some(format!(
+            "Password must be at least {MIN_PASSWORD_LEN} characters"
+        ))
     } else if uniq.len() < 6 {
         Some("Password is too repetitive".into())
     } else if common.iter().any(|c| lower.contains(c)) {
@@ -73,7 +190,10 @@ fn weak_password(pw: &str) -> Option<String> {
 }
 
 fn ask_new_password() -> Result<Zeroizing<String>, String> {
-    println!("{}", style("Tip: 5+ random words make a strong, memorable passphrase.").dim());
+    println!(
+        "{}",
+        style("Tip: 5+ random words make a strong, memorable passphrase.").dim()
+    );
     let pw = Password::with_theme(&theme())
         .with_prompt("Set password")
         .with_confirmation("Repeat password", "Passwords don't match")
@@ -103,7 +223,10 @@ fn create_wallet() -> Result<(), String> {
     ui::secret_screen(|| {
         banner();
         println!("{}", style("WRITE THESE 24 WORDS ON PAPER").red().bold());
-        println!("{}\n", style("Anyone with them can take your coins. No photos, no screenshots.").yellow());
+        println!(
+            "{}\n",
+            style("Anyone with them can take your coins. No photos, no screenshots.").yellow()
+        );
         for i in 0..12 {
             println!(
                 "  {:>2}. {:<9}  {:>2}. {}",
@@ -130,24 +253,34 @@ fn create_wallet() -> Result<(), String> {
     }
     picks.sort();
     banner();
-    println!("{}\n", style("Backup check: enter these words from your paper copy").bold());
+    println!(
+        "{}\n",
+        style("Backup check: enter these words from your paper copy").bold()
+    );
     for idx in picks {
         let answer: String = Input::with_theme(&theme())
             .with_prompt(format!("Word #{}", idx + 1))
             .interact_text()
             .map_err(|e| e.to_string())?;
         if answer.trim().to_lowercase() != words[idx] {
-            return Err("Wrong word. Wallet NOT saved. Check your paper backup and start again.".into());
+            return Err(
+                "Wrong word. Wallet NOT saved. Check your paper backup and start again.".into(),
+            );
         }
     }
 
-    spin("Encrypting wallet…", || keystore::save(&name, &password, &mnemonic))?;
+    spin("Encrypting wallet…", || {
+        keystore::save(&name, &password, &mnemonic)
+    })?;
     let fp = keystore::fingerprint(&mnemonic)?;
     banner();
     ok(&format!("Wallet '{}' created", style(&name).bold()));
     println!("  Fingerprint: {fp}");
     println!("  Stored encrypted at ~/.cairn/wallets/{name}.cairn");
-    println!("{}\n", style("  Your paper backup is the real recovery path. Keep it safe.").yellow());
+    println!(
+        "{}\n",
+        style("  Your paper backup is the real recovery path. Keep it safe.").yellow()
+    );
     pause();
     Ok(())
 }
@@ -162,25 +295,37 @@ fn import_wallet() -> Result<(), String> {
             .interact()
             .map_err(|e| e.to_string())?,
     );
-    let mnemonic = Mnemonic::parse(phrase.trim()).map_err(|e| format!("Invalid seed phrase: {e}"))?;
+    let mnemonic =
+        Mnemonic::parse(phrase.trim()).map_err(|e| format!("Invalid seed phrase: {e}"))?;
     let password = ask_new_password()?;
-    spin("Encrypting wallet…", || keystore::save(&name, &password, &mnemonic))?;
-    ok(&format!("Imported. Fingerprint: {}", keystore::fingerprint(&mnemonic)?));
+    spin("Encrypting wallet…", || {
+        keystore::save(&name, &password, &mnemonic)
+    })?;
+    ok(&format!(
+        "Imported. Fingerprint: {}",
+        keystore::fingerprint(&mnemonic)?
+    ));
     pause();
     Ok(())
 }
 
-fn open_wallet() -> Result<(), String> {
-    banner();
+pub(crate) fn choose_wallet(preselect: Option<&str>) -> Result<String, String> {
     let wallets = keystore::list_wallets()?;
     if wallets.is_empty() {
         return Err("No wallets found. Create or import one first.".into());
     }
+    if let Some(name) = preselect {
+        if wallets.iter().any(|w| w == name) {
+            return Ok(name.to_string());
+        }
+        return Err(format!("No wallet named '{name}'"));
+    }
     let items: Vec<&str> = wallets.iter().map(|s| s.as_str()).collect();
-    println!("{}\n", style("Open Wallet").bold());
     let i = menu(&items)?;
-    let name = &wallets[i];
+    Ok(wallets[i].clone())
+}
 
+pub(crate) fn unlock_wallet(name: &str) -> Result<(Mnemonic, String), String> {
     // Growing delay after each wrong attempt, 5 tries max.
     let mut unlocked = None;
     for attempt in 0..5u32 {
@@ -201,11 +346,18 @@ fn open_wallet() -> Result<(), String> {
             }
         }
     }
-    let (mnemonic, fp) = unlocked.ok_or("Too many failed attempts")?;
+    unlocked.ok_or_else(|| "Too many failed attempts".to_string())
+}
+
+fn open_wallet() -> Result<(), String> {
+    banner();
+    println!("{}\n", style("Open Wallet").bold());
+    let name = choose_wallet(None)?;
+    let (mnemonic, fp) = unlock_wallet(&name)?;
     // Keep only the public account key; the seed is wiped from memory right here.
     let watch = Watch::from_mnemonic(&mnemonic, NETWORK)?;
     drop(mnemonic);
-    dashboard(name, &fp, &watch)
+    dashboard(&name, &fp, &watch)
 }
 
 // ---------- dashboard ----------
@@ -215,7 +367,9 @@ fn run_sync(
     gap: u32,
     prev: Option<&esplora::WalletState>,
 ) -> Result<esplora::WalletState, String> {
-    spin("Syncing with network…", || esplora::sync(watch, gap, prev))
+    spin("Syncing with network…", || {
+        esplora::sync(watch, gap, prev)
+    })
 }
 
 fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
@@ -232,22 +386,44 @@ fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
     }
     loop {
         banner();
-        println!("{} {}   {} {}
-", style("wallet").dim(), style(name).bold(), style("fp").dim(), fp);
+        println!(
+            "{} {}   {} {}
+",
+            style("wallet").dim(),
+            style(name).bold(),
+            style("fp").dim(),
+            fp
+        );
         match &state {
             Some(s) => {
                 let mut lines = vec![
                     style("BALANCE").dim().to_string(),
-                    format!("{} {}", style(fmt_btc(s.confirmed)).green().bold(), style("tBTC").dim()),
+                    format!(
+                        "{} {}",
+                        style(fmt_btc(s.confirmed)).green().bold(),
+                        style("tBTC").dim()
+                    ),
                 ];
                 if s.unconfirmed != 0 {
-                    lines.push(style(format!("{} pending", fmt_btc(s.unconfirmed))).yellow().to_string());
+                    lines.push(
+                        style(format!("{} pending", fmt_btc(s.unconfirmed)))
+                            .yellow()
+                            .to_string(),
+                    );
                 }
                 if let Some(t) = synced_at {
-                    lines.push(style(format!("updated {}s ago", t.elapsed().as_secs())).dim().to_string());
+                    lines.push(
+                        style(format!("updated {}s ago", t.elapsed().as_secs()))
+                            .dim()
+                            .to_string(),
+                    );
                 }
                 if last_err.is_some() {
-                    lines.push(style("⚠ refresh failed, showing last balance").yellow().to_string());
+                    lines.push(
+                        style("⚠ refresh failed, showing last balance")
+                            .yellow()
+                            .to_string(),
+                    );
                 }
                 boxed(&lines);
             }
@@ -261,7 +437,15 @@ fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
         }
         println!();
         let asked = Instant::now();
-        let choice = menu(&["Send  ↗", "Receive  ↙", "Transactions", "Refresh", "Wallet Info", "Lock & Exit"]).unwrap_or(5);
+        let choice = menu(&[
+            "Send  ↗",
+            "Receive  ↙",
+            "Transactions",
+            "Refresh",
+            "Wallet Info",
+            "Lock & Exit",
+        ])
+        .unwrap_or(5);
         if asked.elapsed() > IDLE_LOCK {
             banner();
             fail("Locked after 5 minutes of inactivity. Open the wallet again.");
@@ -296,7 +480,11 @@ fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
             2 => transactions_screen(state.as_ref())?,
             3 => {
                 // Quick re-check of everything known; falls back to a full scan if nothing is cached.
-                let gap = if state.is_some() { esplora::QUICK_GAP } else { esplora::FULL_GAP };
+                let gap = if state.is_some() {
+                    esplora::QUICK_GAP
+                } else {
+                    esplora::FULL_GAP
+                };
                 match run_sync(watch, gap, state.as_ref()) {
                     Ok(s) => {
                         state = Some(s);
@@ -319,11 +507,17 @@ fn receive_screen(watch: &Watch, state: Option<&esplora::WalletState>) -> Result
         let addr = watch.address_at(0, index)?;
         println!("{}\n", style("Receive (testnet)").bold());
         println!("  {}", style(&addr).cyan().bold());
-        println!("  {}\n", style(wallet::derivation_path(NETWORK, 0, index)).dim());
+        println!(
+            "  {}\n",
+            style(wallet::derivation_path(NETWORK, 0, index)).dim()
+        );
         println!("  Send only TESTNET coins here (e.g. from a faucet).");
         println!("  Use a fresh address for each payment.");
         if state.is_none() {
-            println!("{}", style("  Not synced: this address may already be used.").yellow());
+            println!(
+                "{}",
+                style("  Not synced: this address may already be used.").yellow()
+            );
         }
         println!();
         match menu(&["Show QR code", "Next address", "Back"])? {
@@ -345,7 +539,10 @@ fn show_qr(addr: &str) -> Result<(), String> {
         .build();
     println!("{}\n", art);
     println!("  {}", style(addr).cyan());
-    println!("{}\n", style("  If it won't scan, zoom out the terminal or check colors.").dim());
+    println!(
+        "{}\n",
+        style("  If it won't scan, zoom out the terminal or check colors.").dim()
+    );
     pause();
     Ok(())
 }
@@ -368,7 +565,10 @@ fn transactions_screen(state: Option<&esplora::WalletState>) -> Result<(), Strin
                 }
                 for t in txs.iter().take(15) {
                     let (icon, amount) = if t.net >= 0 {
-                        (style("↙").green(), style(format!("+{}", fmt_btc(t.net))).green().bold())
+                        (
+                            style("↙").green(),
+                            style(format!("+{}", fmt_btc(t.net))).green().bold(),
+                        )
                     } else {
                         (style("↗").red(), style(fmt_btc(t.net)).red().bold())
                     };
@@ -391,16 +591,25 @@ fn transactions_screen(state: Option<&esplora::WalletState>) -> Result<(), Strin
 fn info_screen(fp: &str, watch: &Watch) -> Result<(), String> {
     banner();
     println!("{}\n", style("Wallet Info").bold());
-        println!("  Fingerprint:   {fp}");
+    println!("  Fingerprint:   {fp}");
     println!("  Address type:  native SegWit (BIP84)");
     println!("  Network:       {}", esplora::net().label());
     println!("  API servers:   {}", esplora::providers_desc());
-    println!("  Seed in memory: {}", style("no (wiped after unlock)").green());
+    println!(
+        "  Seed in memory: {}",
+        style("no (wiped after unlock)").green()
+    );
     println!("  Idle lock:     5 minutes");
     println!("\n  Account xpub (watch-only; can see balance, cannot spend):");
     println!("  {}", style(watch.xpub_string()).cyan());
-    println!("\n{}", style("  Anyone with the xpub can see all your addresses and balance.").yellow());
-    println!("{}\n", style("  Seed words are never shown here. Use your paper backup.").dim());
+    println!(
+        "\n{}",
+        style("  Anyone with the xpub can see all your addresses and balance.").yellow()
+    );
+    println!(
+        "{}\n",
+        style("  Seed words are never shown here. Use your paper backup.").dim()
+    );
     pause();
     Ok(())
 }
@@ -409,9 +618,15 @@ fn settings() -> Result<(), String> {
     loop {
         banner();
         println!("{}\n", style("Settings").bold());
-        println!("  Network:     {}", style(esplora::net().label()).cyan().bold());
+        println!(
+            "  Network:     {}",
+            style(esplora::net().label()).cyan().bold()
+        );
         println!("  API servers: {}", style(esplora::providers_desc()).dim());
-        println!("{}\n", style("  Set CAIRN_API=https://your-server/api to use your own server.").dim());
+        println!(
+            "{}\n",
+            style("  Set CAIRN_API=https://your-server/api to use your own server.").dim()
+        );
         let items: Vec<String> = esplora::Net::ALL
             .iter()
             .map(|n| format!("Use {}", n.label()))
@@ -425,4 +640,3 @@ fn settings() -> Result<(), String> {
         esplora::set_net(esplora::Net::ALL[i])?;
     }
 }
-

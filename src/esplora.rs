@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 pub const FULL_GAP: u32 = 10; // full scan on open
 pub const QUICK_GAP: u32 = 3; // cheap scan on refresh
-const MAX_INDEX: u32 = 200;
+pub const MAX_INDEX: u32 = 200;
 const MAX_BODY: u64 = 2_000_000; // cap on any response body
 const MAX_PARALLEL: usize = 4; // gentle on public APIs (avoids rate limits)
 const COOLDOWN: Duration = Duration::from_secs(60);
@@ -44,8 +44,14 @@ impl Net {
     fn providers(self) -> &'static [&'static str] {
         match self {
             Net::Testnet4 => &["https://mempool.space/testnet4/api"],
-            Net::Testnet3 => &["https://mempool.space/testnet/api", "https://blockstream.info/testnet/api"],
-            Net::Signet => &["https://mempool.space/signet/api", "https://blockstream.info/signet/api"],
+            Net::Testnet3 => &[
+                "https://mempool.space/testnet/api",
+                "https://blockstream.info/testnet/api",
+            ],
+            Net::Signet => &[
+                "https://mempool.space/signet/api",
+                "https://blockstream.info/signet/api",
+            ],
         }
     }
 }
@@ -65,7 +71,10 @@ fn config_path() -> Option<std::path::PathBuf> {
 pub fn load_config() {
     if let Some(p) = config_path() {
         if let Ok(s) = std::fs::read_to_string(p) {
-            if let Some(n) = Net::ALL.iter().find(|n| n.label().eq_ignore_ascii_case(s.trim())) {
+            if let Some(n) = Net::ALL
+                .iter()
+                .find(|n| n.label().eq_ignore_ascii_case(s.trim()))
+            {
                 *NET.lock().unwrap_or_else(|e| e.into_inner()) = *n;
             }
         }
@@ -181,18 +190,50 @@ fn http_get(url: &str) -> Result<String, String> {
 
 fn http_post(url: &str, body: &str) -> Result<String, String> {
     pace();
-    read_resp(agent().post(url).set("Content-Type", "text/plain").send_string(body))
+    read_resp(
+        agent()
+            .post(url)
+            .set("Content-Type", "text/plain")
+            .send_string(body),
+    )
+}
+
+/// Footgun guard: only HTTPS URLs whose host or path names a test network are
+/// accepted. This stops an accidental mainnet URL; it does not prove which chain
+/// a server actually serves (use your own node for that).
+fn looks_like_testnet_url(p: &str) -> bool {
+    let Some(rest) = p.strip_prefix("https://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let host = host.split(':').next().unwrap_or(host);
+    let path = rest.strip_prefix(authority).unwrap_or("");
+    host.split('.')
+        .chain(path.split(['/', '?', '#']))
+        .any(|seg| {
+            matches!(
+                seg.to_ascii_lowercase().as_str(),
+                "testnet" | "testnet3" | "testnet4" | "signet"
+            )
+        })
 }
 
 /// Try each provider (healthy ones first). A provider that fails is rested for a minute.
-fn try_providers(path: &str, call: &dyn Fn(&str) -> Result<String, String>) -> Result<String, String> {
+fn try_providers(
+    path: &str,
+    call: &dyn Fn(&str) -> Result<String, String>,
+) -> Result<String, String> {
     let provs = providers();
     for p in &provs {
-        if !(p.contains("testnet") || p.contains("signet")) {
-            return Err("Refusing: API URL doesn't look like testnet/signet".into());
+        if !looks_like_testnet_url(p) {
+            return Err(
+                "Refusing: API URL must be https and name a testnet/signet endpoint".into(),
+            );
         }
     }
-    let (mut order, resting): (Vec<String>, Vec<String>) = provs.into_iter().partition(|p| !is_cooling(p));
+    let (mut order, resting): (Vec<String>, Vec<String>) =
+        provs.into_iter().partition(|p| !is_cooling(p));
     order.extend(resting);
     let mut last = String::new();
     for p in order {
@@ -207,7 +248,11 @@ fn try_providers(path: &str, call: &dyn Fn(&str) -> Result<String, String>) -> R
                     last = e;
                     if attempt < 2 {
                         // Rate limited (429): back off much longer than for other errors.
-                        let ms = if last.contains("429") { 2000 * (attempt + 1) } else { 700 };
+                        let ms = if last.contains("429") {
+                            2000 * (attempt + 1)
+                        } else {
+                            700
+                        };
                         std::thread::sleep(Duration::from_millis(ms));
                     }
                 }
@@ -235,7 +280,10 @@ fn par_map<T: Sync, R: Send>(
             let handles: Vec<_> = chunk.iter().map(|it| s.spawn(move || f(it))).collect();
             handles
                 .into_iter()
-                .map(|h| h.join().unwrap_or_else(|_| Err("worker panicked".to_string())))
+                .map(|h| {
+                    h.join()
+                        .unwrap_or_else(|_| Err("worker panicked".to_string()))
+                })
                 .collect()
         });
         for r in results {
@@ -285,7 +333,12 @@ struct ChainScan {
 
 /// Scan one chain in parallel batches. Stops after `gap_limit` unused addresses in a row,
 /// but never before `min_index` (addresses we already know about from the last sync).
-fn scan_chain(watch: &Watch, chain: u32, gap_limit: u32, min_index: u32) -> Result<ChainScan, String> {
+fn scan_chain(
+    watch: &Watch,
+    chain: u32,
+    gap_limit: u32,
+    min_index: u32,
+) -> Result<ChainScan, String> {
     let mut res = ChainScan::default();
     let (mut gap, mut idx) = (0u32, 0u32);
     while (gap < gap_limit || idx < min_index) && idx < MAX_INDEX {
@@ -308,8 +361,14 @@ fn scan_chain(watch: &Watch, chain: u32, gap_limit: u32, min_index: u32) -> Resu
 }
 
 /// `prev` (if any) makes a quick refresh safe: we always re-check everything known before.
-pub fn sync(watch: &Watch, gap_limit: u32, prev: Option<&WalletState>) -> Result<WalletState, String> {
-    let (min_r, min_c) = prev.map(|p| (p.next_receive, p.next_change)).unwrap_or((0, 0));
+pub fn sync(
+    watch: &Watch,
+    gap_limit: u32,
+    prev: Option<&WalletState>,
+) -> Result<WalletState, String> {
+    let (min_r, min_c) = prev
+        .map(|p| (p.next_receive, p.next_change))
+        .unwrap_or((0, 0));
     let (r, c) = std::thread::scope(|s| {
         let h0 = s.spawn(|| scan_chain(watch, 0, gap_limit, min_r));
         let h1 = s.spawn(|| scan_chain(watch, 1, gap_limit.min(5), min_c));
@@ -370,7 +429,14 @@ pub fn transactions(state: &WalletState) -> Result<Vec<TxSummary>, String> {
             } else {
                 None
             };
-            seen.insert(txid.clone(), TxSummary { txid, net: net_for_tx(tx, &ours), height });
+            seen.insert(
+                txid.clone(),
+                TxSummary {
+                    txid,
+                    net: net_for_tx(tx, &ours),
+                    height,
+                },
+            );
         }
     }
     let mut out: Vec<TxSummary> = seen.into_values().collect();
@@ -407,13 +473,21 @@ pub fn utxos(addr: &str) -> Result<Vec<Utxo>, String> {
             .ok_or("bad txid from server")?;
         let vout = u["vout"].as_u64().ok_or("bad vout from server")? as u32;
         let value = u["value"].as_u64().ok_or("bad value from server")?;
-        out.push(Utxo { txid, vout, value, address: addr.to_string() });
+        out.push(Utxo {
+            txid,
+            vout,
+            value,
+            address: addr.to_string(),
+        });
     }
     Ok(out)
 }
 
 pub fn utxos_for(addrs: &[String]) -> Result<Vec<Utxo>, String> {
-    Ok(par_map(addrs, |a| utxos(a))?.into_iter().flatten().collect())
+    Ok(par_map(addrs, |a| utxos(a))?
+        .into_iter()
+        .flatten()
+        .collect())
 }
 
 pub struct Rates {
@@ -439,3 +513,23 @@ pub fn broadcast(hex: &str) -> Result<String, String> {
     Ok(body.trim().to_string())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_url_guard() {
+        assert!(looks_like_testnet_url("https://mempool.space/testnet4/api"));
+        assert!(looks_like_testnet_url("https://mempool.space/testnet/api"));
+        assert!(looks_like_testnet_url(
+            "https://blockstream.info/signet/api"
+        ));
+        assert!(looks_like_testnet_url("https://testnet.example/api"));
+        assert!(!looks_like_testnet_url("http://mempool.space/testnet/api"));
+        assert!(!looks_like_testnet_url("https://mempool.space/api"));
+        assert!(!looks_like_testnet_url("https://example.com/mainnet/api"));
+        assert!(!looks_like_testnet_url(
+            "https://example.com/testnetfoo/api"
+        ));
+    }
+}
