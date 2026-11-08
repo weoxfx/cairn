@@ -59,7 +59,7 @@ or require an independent audit to assess properly.
 | S-09 | Low | KDF upper bound allows local 1 GiB work factor | Fixed (bounded) |
 | S-10 | Info | Cross-host HTTPS redirects | Fixed |
 | S-11 | Info | Mainnet marker is forgeable by same-user malware | Accepted |
-| S-12 | Info | No `mlock`; terminal wiping is best effort | Accepted |
+| S-12 | Info | No `mlock`; terminal wiping is best effort | Mitigated (best effort) |
 | S-13 | Info | Testnet variants share coin type 1 and URL-based identification | Accepted |
 
 ### S-01 — Unbounded server/PSBT amounts (fixed)
@@ -170,11 +170,13 @@ writable, and it is written atomically with mode 600. Malware running as the use
 set it. The gate exists to prevent accidental mainnet use, not
 to resist a compromised account. This is documented in `SECURITY.md`.
 
-### S-12 — No memory locking; terminal wiping is best effort (accepted)
+### S-12 — Memory locking; terminal wiping is best effort (mitigated, best effort)
 
-Secrets are not `mlock`ed, so swap/hibernation can capture them. The seed display uses the terminal's
-alternate screen and clears it afterwards, but terminal emulators, tmux logging and screen capture may
-retain it. Users must trust the device and terminal.
+The decrypted mnemonic and the signer's key allocation are now `mlock`ed when the OS allows it, so
+they are less likely to reach swap. Locking can be refused (for example by a low `RLIMIT_MEMLOCK`)
+and is not a guarantee; if it fails, swap/hibernation can still capture secrets. The seed display
+uses the terminal's alternate screen and clears it afterwards, but terminal emulators, tmux logging
+and screen capture may retain it. Users must trust the device and terminal.
 
 ### S-13 — Testnet variants share coin type 1 (accepted)
 
@@ -223,6 +225,25 @@ Accepted, not changed:
 - Directory creation and chmod have the usual same-user TOCTOU window. Same-user malware is outside the
   threat model.
 
+## Third-pass hardening (2026-11-08)
+
+- **H-01 (Medium, fixed) — fee ceiling.** `send::plan` now rejects a fee above 10% of the recipient
+  amount (with a 10,000-sat floor for ordinary small sends) or above 1,000,000 sats absolute. Server
+  estimates and manual entry were already clamped to 1..=1000 sat/vB; this adds the missing hard
+  stop and bounds what a malicious estimate can burn. The same ceiling is enforced by the offline
+  PSBT verifier and by `--broadcast`.
+- **H-02 (Low, fixed) — prevout cross-check.** Before review, the online side re-fetches each
+  selected coin's creating transaction and compares the output's value and address with the UTXO
+  endpoint. A mismatch, missing output or unconfirmed status fails closed. Verification is capped at
+  100 unique transactions. The offline signer cannot do this and still relies on the PSBT's witness
+  UTXO, as documented.
+- **H-03 (Info, mitigated) — memory locking.** The decrypted mnemonic and the signer's key
+  allocation are `mlock`ed best effort. Failure is non-fatal and documented; this reduces but does
+  not eliminate swap/hibernation exposure.
+- **H-04 (Info, fixed) — PSBT fuzz target.** `psbt_guard::check_structure` holds the
+  wallet-independent structural and arithmetic checks used by the offline verifier, and `fuzz/psbt`
+  exercises deserialization plus those checks.
+
 ## Fuzzing harness (2026-11-08)
 
 `fuzz/` links the real parser modules through a new library target (`src/lib.rs`, `[lib] test = false`)
@@ -233,13 +254,17 @@ and runs coverage-guided libFuzzer targets:
   such as `https://` and `//`, which `resolve_redirect` now rejects instead of returning them.
 - `qr_frames` — arbitrary frame lists; accepted payloads are re-encoded and must round-trip
   byte-identically.
+- `psbt` — PSBT deserialization plus the shared structure/arithmetic checks; accepted PSBTs must
+  re-serialize and parse again.
 
-A 20-second smoke run of each target completed with no crashes and no artifacts; CI repeats each for
-120 seconds weekly. This is a harness addition, not an audit. PSBT and keystore verification need pure
-adapters before they can be fuzzed and are the next target.
+A 20-second smoke run of each target completed with no crashes and no artifacts; the PSBT target
+completed 182,288 executions. CI repeats each for 120 seconds weekly. This is a harness addition, not
+an audit. Keystore JSON still needs a pure adapter before it can be fuzzed through the library.
 
 ## Positive observations
 
+- Sends cap the fee and cross-check every selected prevout online; the offline verifier shares its
+  structural checks with the fuzz target.
 - The keystore uses Argon2id and ChaCha20-Poly1305 from RustCrypto, with random salt and nonce per
   save. v2 AAD binds network, fingerprint, KDF parameters, salt and nonce; relabelling or parameter
   downgrade fails authentication.
@@ -268,8 +293,8 @@ safe, the project still needs at least:
    dry-run plan that does not risk funds.
 4. Platform testing on Linux, macOS and Termux/Android, including terminal behaviour and process
    hardening differences.
-5. A decision on memory locking (`mlock`) and further local-file DoS limits; cross-host redirects
-   and the KDF upper bound are now closed.
+5. A review of `mlock` failure behavior (locking is best effort) and further local-file DoS limits;
+   cross-host redirects, the fee ceiling, prevout checks and the KDF upper bound are now addressed.
 
 Until then: keep testnet as the default, keep mainnet opt-in and clearly labelled unaudited, and do
 not use Cairn for meaningful real funds.

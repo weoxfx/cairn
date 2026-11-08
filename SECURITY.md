@@ -42,16 +42,22 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
   weaken the key derivation or exhaust memory. Version 2 authenticates the
   network, fingerprint, KDF parameters, salt and nonce in the AAD, so relabelling a mainnet wallet
   as testnet (or downgrading its KDF) fails decryption. Version 1 testnet wallets remain readable.
-- **Session:** after unlock only the public account key is kept. Temporary private keys
-  derived while building the watch-only view are erased. The seed is wiped. The network code
-  never has access to anything that can spend. The session re-locks after 5 minutes idle.
+- **Session:** after unlock only the public account key is kept. The decrypted mnemonic and the
+  signer's key allocation are held in `mlock`ed heap allocations when the OS allows it, and erased
+  on drop. Temporary private keys derived while building the watch-only view are erased. The
+  network code never has access to anything that can spend. The session re-locks after 5 minutes
+  idle.
 - **Sending:** password re-entry, keys must match the wallet session and each coin's script, amounts
-  are checked to add up and capped at 21 million BTC, minimum fee check, explicit `SEND`
-  confirmation, deterministic signatures. Server-provided txids are validated before display.
+  are checked to add up and capped at 21 million BTC. Selected coins are re-checked against the
+  transaction that created them (value and address must match) before review. A fee ceiling rejects
+  more than 10% of the recipient amount (with a 10,000-sat floor for ordinary small sends) or more
+  than 1,000,000 sats absolute. Explicit `SEND` confirmation and deterministic signatures.
+  Server-provided txids are validated before display.
 - **Offline signing:** `--offline` performs no network I/O. It rejects an already-signed PSBT,
   checks every input belongs to the loaded wallet with an `m/84'/coin'/0'/chain/index` key origin
   for the wallet's network and a matching P2WPKH script, classifies change against the wallet's
-  addresses, rejects amounts above the money supply, enforces a minimum fee, and requires `SEND`.
+  addresses, rejects amounts above the money supply, enforces a minimum fee and the fee ceiling, and
+  requires `SEND`.
   PSBT files are capped at 5 MB, must be regular files and are opened with `O_NOFOLLOW` (no FIFOs or
   symlinks); signed output is written atomically with mode 600. The online `--broadcast` step
   rejects a signed PSBT whose unsigned transaction or input metadata differs from the unsigned file
@@ -83,8 +89,9 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
   amounts it displays come from the PSBT file. Verify the total and fee against what the online
   wallet showed before signing. The offline PSBT checks do not replace reading the review screen.
 - Short-lived copies of secrets that libraries do not wipe (for example the password prompt and some
-  key types). Erasing is best-effort, and secrets are not `mlock`ed, so a swapped or hibernated
-  machine can still expose them.
+  key types). Erasing is best-effort. The decrypted mnemonic and signer keys are `mlock`ed when the
+  OS allows it, but locking can be refused (for example by `RLIMIT_MEMLOCK`) and is not a guarantee;
+  a swapped or hibernated machine can still expose them in that case.
 - **API redirects:** the client refuses cross-host, non-HTTPS and broadcast redirects. Same-host
   HTTPS redirects are still followed, so a malicious provider can change paths and metadata
   exposure within its own host. No key material is sent, and responses remain untrusted.

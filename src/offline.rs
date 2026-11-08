@@ -80,6 +80,9 @@ pub fn create_psbt(wallet: Option<String>, out: Option<String>) -> Result<(), St
     let rate = prompt_rate(rates)?;
     let change_addr = send::parse_address(&watch.address_at(1, state.next_change)?, network)?;
     let plan = send::plan(utxos, to, amount, rate, change_addr)?;
+    spin("Verifying coins…", || {
+        esplora::verify_prevouts(net, &plan.inputs)
+    })?;
 
     // Same invariant as the online send flow: the numbers must add up exactly.
     let total_in = plan
@@ -251,40 +254,25 @@ fn verify_psbt(
     signer: &Signer,
     network: Network,
 ) -> Result<Verified, String> {
+    // Structure, signedness, previous-transaction consistency and arithmetic
+    // are wallet-independent and shared with the fuzzer.
+    let (total_in, total_out) = crate::psbt_guard::check_structure(psbt)?;
     let tx = &psbt.unsigned_tx;
-    if psbt.inputs.len() != tx.input.len() || psbt.outputs.len() != tx.output.len() {
-        return Err("malformed PSBT: input/output counts do not match the transaction".into());
-    }
-
     let master_fp = signer.fingerprint();
-    let mut total_in = 0u64;
-    for (i, (txin, input)) in tx.input.iter().zip(&psbt.inputs).enumerate() {
-        if !txin.script_sig.is_empty() || !txin.witness.is_empty() {
-            return Err(format!("input {i} is not unsigned"));
-        }
-        if !input.partial_sigs.is_empty()
-            || input.final_script_witness.is_some()
-            || input.final_script_sig.is_some()
-        {
-            return Err("this PSBT is already signed".into());
-        }
-        if !matches!(input.ecdsa_hash_ty(), Ok(bitcoin::EcdsaSighashType::All)) {
-            return Err(format!("input {i} does not use SIGHASH_ALL"));
-        }
+
+    for (i, (_, input)) in tx.input.iter().zip(&psbt.inputs).enumerate() {
         let utxo = input
             .witness_utxo
             .as_ref()
             .ok_or_else(|| format!("input {i} has no witness UTXO"))?;
-        if utxo.value.to_sat() > network::MAX_MONEY_SATS {
-            return Err(format!("input {i} value exceeds the 21 million BTC supply"));
-        }
         if !utxo.script_pubkey.is_p2wpkh() {
             return Err(format!("input {i} is not a native SegWit P2WPKH output"));
         }
-        if input.bip32_derivation.len() != 1 {
-            return Err(format!("input {i} must have exactly one BIP32 key origin"));
-        }
-        let (pubkey, (fp, path)) = input.bip32_derivation.iter().next().unwrap();
+        let (pubkey, (fp, path)) = input
+            .bip32_derivation
+            .iter()
+            .next()
+            .ok_or_else(|| format!("input {i} has no BIP32 key origin"))?;
         if *fp != master_fp {
             return Err("PSBT belongs to a different wallet (fingerprint mismatch)".into());
         }
@@ -298,27 +286,13 @@ fn verify_psbt(
         if derived_pubkey != *pubkey {
             return Err(format!("input {i}: key does not match this wallet"));
         }
-        total_in = total_in
-            .checked_add(utxo.value.to_sat())
-            .ok_or("amount overflow")?;
-        if total_in > network::MAX_MONEY_SATS {
-            return Err("PSBT input total exceeds the 21 million BTC supply".into());
-        }
     }
 
     let ours = our_scripts(watch)?;
-    let mut total_out = 0u64;
     let mut change = 0u64;
     let mut external = vec![];
     for output in &tx.output {
         let sats = output.value.to_sat();
-        if sats > network::MAX_MONEY_SATS {
-            return Err("PSBT output exceeds the 21 million BTC supply".into());
-        }
-        total_out = total_out.checked_add(sats).ok_or("amount overflow")?;
-        if total_out > network::MAX_MONEY_SATS {
-            return Err("PSBT output total exceeds the 21 million BTC supply".into());
-        }
         let addr = Address::from_script(&output.script_pubkey, network)
             .map(|a| a.to_string())
             .unwrap_or_else(|_| format!("script:{}", output.script_pubkey));
@@ -329,9 +303,13 @@ fn verify_psbt(
         }
     }
 
-    let fee = total_in
-        .checked_sub(total_out)
-        .ok_or("PSBT spends more than its inputs")?;
+    // `check_structure` guarantees total_in >= total_out.
+    let fee = total_in - total_out;
+    let external_total = external
+        .iter()
+        .try_fold(0u64, |acc, (_, sats)| acc.checked_add(*sats))
+        .ok_or("amount overflow")?;
+    crate::send::check_fee(fee, external_total)?;
     // Conservative lower bound on relay fee; the real vsize is checked after signing.
     let vsize_est = 11 + 68 * psbt.inputs.len() as u64 + 31 * tx.output.len() as u64;
     if fee < vsize_est {
@@ -443,6 +421,13 @@ pub fn broadcast(unsigned_path: String, signed_path: String) -> Result<(), Strin
         .fee()
         .map_err(|e| format!("cannot compute fee: {e}"))?
         .to_sat();
+    let total_out = signed
+        .unsigned_tx
+        .output
+        .iter()
+        .try_fold(0u64, |acc, o| acc.checked_add(o.value.to_sat()))
+        .ok_or("amount overflow")?;
+    crate::send::check_fee(fee, total_out)?;
     let tx = signed
         .clone()
         .extract_tx()
@@ -612,7 +597,7 @@ fn prompt_rate(rates: Option<esplora::Rates>) -> Result<f64, String> {
             .with_prompt("Fee rate in sat/vB (estimates unavailable)")
             .default(2.0f64)
             .validate_with(|v: &f64| -> Result<(), &str> {
-                if *v >= 1.0 && *v <= 1000.0 {
+                if *v >= 1.0 && *v <= network::MAX_FEE_RATE {
                     Ok(())
                 } else {
                     Err("Enter a value from 1 to 1000")
@@ -786,6 +771,15 @@ mod tests {
             verify_psbt(&psbt, &watch, &signer, Network::Testnet).is_err(),
             "output above the money supply must be rejected"
         );
+    }
+
+    #[test]
+    fn rejects_absurd_fee() {
+        let (mut psbt, watch, signer) = fixture(Network::Testnet);
+        // The offline machine must not sign a PSBT whose claimed input value
+        // turns the fee into almost the whole coin.
+        psbt.inputs[0].witness_utxo.as_mut().unwrap().value = Amount::from_sat(10_000_000);
+        assert!(verify_psbt(&psbt, &watch, &signer, Network::Testnet).is_err());
     }
 
     #[test]

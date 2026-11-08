@@ -11,6 +11,9 @@ use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+/// Hard ceiling for fee rates, applied to server estimates and manual entry.
+pub const MAX_FEE_RATE: f64 = 1000.0;
+
 pub const MAINNET_ENV: &str = "CAIRN_ENABLE_MAINNET";
 pub const MAINNET_TOKEN: &str = "I_UNDERSTAND_UNAUDITED_MAINNET";
 const MARKER: &str = "mainnet-enabled";

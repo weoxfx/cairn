@@ -24,6 +24,9 @@ use std::collections::HashMap;
 const DUST: u64 = 294; // P2WPKH dust threshold in sats
 const MAX_MONEY: u64 = network::MAX_MONEY_SATS;
 const TYPICAL_VBYTES: u64 = 141; // 1 input + 2 outputs, for fee previews
+const MAX_FEE_SATS: u64 = 1_000_000; // hard ceiling: 0.01 BTC
+const MAX_FEE_PERCENT: f64 = 10.0; // cap relative to what the recipient receives
+const FEE_PERCENT_FLOOR_SATS: u64 = 10_000; // allow normal fees on small sends
 
 // ---------- parsing ----------
 
@@ -84,6 +87,25 @@ pub struct Plan {
     pub rate: f64,
 }
 
+/// Reject a fee that is either above the absolute ceiling or a large fraction
+/// of what the recipient receives. The floor keeps ordinary fees on small
+/// sends from being rejected.
+pub(crate) fn check_fee(fee: u64, amount: u64) -> Result<(), String> {
+    let percent = if amount == 0 {
+        f64::INFINITY
+    } else {
+        fee as f64 * 100.0 / amount as f64
+    };
+    if fee > MAX_FEE_SATS || (fee > FEE_PERCENT_FLOOR_SATS && percent > MAX_FEE_PERCENT) {
+        return Err(format!(
+            "fee of {fee} sats is above the safety cap ({MAX_FEE_PERCENT:.0}% of the amount, \
+             with a {FEE_PERCENT_FLOOR_SATS}-sat floor and a {MAX_FEE_SATS}-sat hard limit); \
+             lower the fee rate"
+        ));
+    }
+    Ok(())
+}
+
 /// Largest-first coin selection. Change below dust goes to the fee (shown on the review screen).
 pub fn plan(
     mut utxos: Vec<Utxo>,
@@ -106,10 +128,12 @@ pub fn plan(
             if utxos.is_empty() || total < fee + DUST {
                 return Err("Balance is too small to cover the fee".into());
             }
+            let amount = total - fee;
+            check_fee(fee, amount)?;
             Ok(Plan {
                 inputs: utxos,
                 to,
-                amount: total - fee,
+                amount,
                 fee,
                 change: None,
                 rate,
@@ -131,6 +155,7 @@ pub fn plan(
                 let fee_plain = fee_for(rate, vsize(sel.len(), 1));
                 if sum >= amt + fee_change && sum - amt - fee_change >= DUST {
                     let change = sum - amt - fee_change;
+                    check_fee(fee_change, amt)?;
                     return Ok(Plan {
                         inputs: sel,
                         to,
@@ -141,11 +166,13 @@ pub fn plan(
                     });
                 }
                 if sum >= amt + fee_plain {
+                    let fee = sum - amt;
+                    check_fee(fee, amt)?;
                     return Ok(Plan {
                         inputs: sel,
                         to,
                         amount: amt,
-                        fee: sum - amt,
+                        fee,
                         change: None,
                         rate,
                     });
@@ -409,7 +436,7 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
             .with_prompt("Fee rate in sat/vB (estimates unavailable)")
             .default(2.0f64)
             .validate_with(|v: &f64| -> Result<(), &str> {
-                if *v >= 1.0 && *v <= 1000.0 {
+                if *v >= 1.0 && *v <= network::MAX_FEE_RATE {
                     Ok(())
                 } else {
                     Err("Enter a value from 1 to 1000")
@@ -421,6 +448,9 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
 
     let change_addr = parse_address(&watch.address_at(1, state.next_change)?, network)?;
     let p = plan(utxos, to, amount, rate, change_addr)?;
+    spin("Verifying coins…", || {
+        esplora::verify_prevouts(net, &p.inputs)
+    })?;
 
     // Sanity: numbers must add up exactly.
     let total_in = p
@@ -625,6 +655,35 @@ mod tests {
         let p = plan(vec![utxo(30_300, &a0)], to, Some(30_000), 1.0, change).unwrap();
         assert!(p.change.is_none());
         assert_eq!(p.fee, 300);
+    }
+
+    #[test]
+    fn fee_cap_rejects_absurd_fees() {
+        let (a0, to, change, _) = addrs(Network::Testnet);
+
+        // Max send of 200k at 1,000 sat/vB: a ~110k fee is over 10% of what is left.
+        assert!(plan(
+            vec![utxo(200_000, &a0)],
+            to.clone(),
+            None,
+            1000.0,
+            change.clone()
+        )
+        .is_err());
+
+        // A 141k fee on a 50k send is over 10% of the amount.
+        assert!(plan(
+            vec![utxo(1_000_000, &a0)],
+            to.clone(),
+            Some(50_000),
+            1000.0,
+            change.clone()
+        )
+        .is_err());
+
+        // Many inputs at the rate ceiling trip the absolute 1M-sat cap.
+        let many: Vec<Utxo> = (0..20).map(|i| utxo(100_000 + i, &a0)).collect();
+        assert!(plan(many, to, None, 1000.0, change).is_err());
     }
 
     #[test]

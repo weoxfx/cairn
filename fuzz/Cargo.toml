@@ -25,4 +25,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "psbt"
+path = "fuzz_targets/psbt.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

@@ -8,6 +8,7 @@ pub mod esplora;
 pub mod hardening;
 pub mod keystore;
 pub mod network;
+pub mod psbt_guard;
 pub mod qr;
 pub mod ui;
 pub mod wallet;

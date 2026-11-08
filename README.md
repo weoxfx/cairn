@@ -44,8 +44,8 @@ mainnet server (and the reverse). Use hardware or reviewed wallets for anything 
 |---|---|
 | Seed | 256 bits from the OS random source, shown once on the terminal's alternate screen (no scrollback), then a 3-word backup quiz |
 | Storage | Only the encrypted entropy is saved. Argon2id (128 MB, 3 passes) then ChaCha20-Poly1305. The v2 AAD authenticates network, fingerprint, KDF parameters, salt and nonce. Atomic writes that never follow a symlink, mode 600, `.cairn` kept at 700, symlinked wallet dirs refused, KDF bounds enforced on load. v1 testnet wallets still open |
-| Memory | After unlock only the public account key (xpub) is kept. The seed is wiped. Spending keys exist only for the moment of signing |
-| Sending | Re-asks the password, checks the keys match the wallet and each coin, checks that the amounts add up, uses deterministic (RFC6979) signatures |
+| Memory | After unlock only the public account key (xpub) is kept. The decrypted mnemonic and signing keys are held in `mlock`ed allocations when the OS allows it, and erased on drop. Spending keys exist only for the moment of signing |
+| Sending | Re-asks the password, checks the keys match the wallet and each coin, re-fetches each spent coin's creating transaction to compare value/address, checks that the amounts add up, enforces a fee ceiling (10% of the amount, 10k-sat floor, 1M-sat hard cap), uses deterministic (RFC6979) signatures |
 | Offline | `--offline` never opens a socket. It checks that every input belongs to the wallet, has the expected network-specific BIP84 path and script, that change is ours and that the fee clears the relay minimum. PSBT files must be regular files (no FIFOs or symlinks) and signed output is written atomically at mode 600. The online side refuses a signed PSBT that changed any input or output. QR frames are checksummed and then go through the same checks; they are public data, not encrypted |
 | Network | HTTPS-only with certificate checks; redirects are same-host only and re-checked, broadcasts refuse them. Response size caps, rate pacing, failover, chain-aware URL guard. Server data is treated as untrusted; amounts and balances bounded, txids validated, control characters and invisible Unicode format characters stripped |
 | Mainnet gate | Disabled until an explicit marker or session token, a typed confirmation per session, and warnings on every mainnet screen. This is an accident guard, not an audit |
@@ -144,7 +144,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 - [x] Gated, unaudited mainnet support
 - [ ] Optional passphrase (25th word), 2-of-3 multisig
 - [ ] Own-node support (Electrum protocol), Tor
-- [ ] Reproducible builds, fuzzing, independent audit (required before recommending mainnet)
+- [x] Fuzzing harness for URL/redirect, QR frames and PSBT (keystore pending)
+- [ ] Reproducible builds and independent audit (required before recommending mainnet)
 
 ## License
 

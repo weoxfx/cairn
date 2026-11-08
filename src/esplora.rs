@@ -2,8 +2,9 @@
 //! The server can see your IP and which addresses you query.
 //!
 //! Everything the server returns is untrusted. Balances/history are display-only;
-//! for sending we only take UTXO txid/vout/value, and signatures commit to those
-//! values (a lying server can make a transaction invalid, not steal coins).
+//! for sending we take UTXO txid/vout/value and re-check the creating transaction,
+//! and signatures commit to those values (a lying server can make a transaction
+//! invalid, not steal coins).
 
 use crate::hardening;
 use crate::network;
@@ -25,6 +26,7 @@ const MAX_REDIRECTS: usize = 3; // a redirect may stay on the same host only
 const MAX_PARALLEL: usize = 4; // gentle on public APIs (avoids rate limits)
 const MAX_UTXOS_PER_ADDRESS: usize = 10_000; // reject absurd server responses
 const MAX_UTXOS_TOTAL: usize = 20_000;
+const MAX_PREVOUT_TXIDS: usize = 100; // bound extra verification requests
 const MAX_TX_SUMMARIES: usize = 100_000;
 const COOLDOWN: Duration = Duration::from_secs(60);
 const MIN_GAP: Duration = Duration::from_millis(200); // at most ~5 requests/second overall
@@ -784,6 +786,74 @@ fn parse_utxo(u: &Value, addr: &str) -> Result<Utxo, String> {
     })
 }
 
+/// Check one server-supplied UTXO against the transaction that created it.
+fn check_prevout(tx: &Value, u: &Utxo) -> Result<(), String> {
+    let expected = u.txid.to_string();
+    let txid = tx["txid"]
+        .as_str()
+        .ok_or("previous transaction has no txid")?;
+    if txid != expected {
+        return Err("previous transaction id does not match the coin".into());
+    }
+    if !tx["status"]["confirmed"].as_bool().unwrap_or(false) {
+        return Err("coin's previous transaction is not confirmed".into());
+    }
+    let vout = tx["vout"]
+        .as_array()
+        .and_then(|v| v.get(u.vout as usize))
+        .ok_or("previous transaction has no such output")?;
+    let value = vout["value"]
+        .as_u64()
+        .ok_or("previous output has no value")?;
+    if value > network::MAX_MONEY_SATS {
+        return Err("previous output exceeds the 21 million BTC supply".into());
+    }
+    if value != u.value {
+        return Err("server lied about the coin's value".into());
+    }
+    let addr = vout["scriptpubkey_address"]
+        .as_str()
+        .ok_or("previous output has no address")?;
+    if addr != u.address {
+        return Err("server lied about the coin's address".into());
+    }
+    Ok(())
+}
+
+/// Re-fetch the creating transaction for every coin being spent and compare the
+/// output's value and address with what the UTXO endpoint claimed. This is
+/// defense in depth: BIP143 already commits to the value, so a lie makes the
+/// transaction invalid rather than stealing, but failing closed here stops the
+/// wallet from signing metadata it has not cross-checked.
+pub fn verify_prevouts(net: Net, utxos: &[Utxo]) -> Result<(), String> {
+    if utxos.is_empty() {
+        return Ok(());
+    }
+    let mut txids: Vec<String> = utxos.iter().map(|u| u.txid.to_string()).collect();
+    txids.sort();
+    txids.dedup();
+    if txids.len() > MAX_PREVOUT_TXIDS {
+        return Err(format!(
+            "refusing to verify {} coins in one transaction (limit {MAX_PREVOUT_TXIDS}); consolidate first",
+            txids.len()
+        ));
+    }
+    let fetched = par_map(&txids, |t| get(net, &format!("/tx/{t}")))?;
+    let by_txid: HashMap<&str, &Value> = txids
+        .iter()
+        .map(|s| s.as_str())
+        .zip(fetched.iter())
+        .collect();
+    for u in utxos {
+        let key = u.txid.to_string();
+        let tx = by_txid
+            .get(key.as_str())
+            .ok_or("internal error: missing verified transaction")?;
+        check_prevout(tx, u)?;
+    }
+    Ok(())
+}
+
 pub fn utxos(net: Net, addr: &str) -> Result<Vec<Utxo>, String> {
     let v = get(net, &format!("/address/{addr}/utxo"))?;
     let mut out = vec![];
@@ -826,7 +896,7 @@ pub fn fee_rates(net: Net) -> Result<Rates, String> {
     // Reject NaN/inf from the server instead of turning them into a zero fee.
     let clamp = |x: f64| {
         if x.is_finite() {
-            x.clamp(1.0, 1000.0)
+            x.clamp(1.0, network::MAX_FEE_RATE)
         } else {
             1.0
         }
@@ -852,6 +922,45 @@ pub fn broadcast(net: Net, hex: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin::hashes::Hash;
+
+    #[test]
+    fn prevout_checks_reject_server_lies() {
+        use serde_json::json;
+        let txid = Txid::from_byte_array([7u8; 32]);
+        let txid_str = txid.to_string();
+        let address = "tb1qexample".to_string();
+        let u = Utxo {
+            txid,
+            vout: 1,
+            value: 50_000,
+            address: address.clone(),
+        };
+        let mut tx = json!({
+            "txid": txid_str,
+            "status": {"confirmed": true},
+            "vout": [
+                {"value": 1, "scriptpubkey_address": "tb1qother"},
+                {"value": 50_000, "scriptpubkey_address": address.clone()}
+            ]
+        });
+        assert!(check_prevout(&tx, &u).is_ok());
+
+        tx["vout"][1]["value"] = json!(49_999);
+        assert!(check_prevout(&tx, &u).is_err());
+        tx["vout"][1]["value"] = json!(50_000);
+
+        tx["vout"][1]["scriptpubkey_address"] = json!("tb1qother");
+        assert!(check_prevout(&tx, &u).is_err());
+        tx["vout"][1]["scriptpubkey_address"] = json!(address);
+
+        tx["status"]["confirmed"] = json!(false);
+        assert!(check_prevout(&tx, &u).is_err());
+        tx["status"]["confirmed"] = json!(true);
+
+        tx["txid"] = json!(Txid::from_byte_array([8u8; 32]).to_string());
+        assert!(check_prevout(&tx, &u).is_err());
+    }
 
     #[test]
     fn provider_url_guard_is_chain_aware() {

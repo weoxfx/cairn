@@ -11,6 +11,7 @@ cargo install cargo-fuzz --locked
 cargo +nightly fuzz list
 cargo +nightly fuzz run url_guard -- -max_total_time=300
 cargo +nightly fuzz run qr_frames -- -max_total_time=300
+cargo +nightly fuzz run psbt -- -max_total_time=300
 ```
 
 Targets:
@@ -21,6 +22,10 @@ Targets:
   parser-differential class.
 - `qr_frames` — `reassemble` over arbitrary frame lists, then re-encodes any
   accepted payload and checks the round-trip is byte-identical.
+- `psbt` — `Psbt::deserialize` plus `psbt_guard::check_structure`: unsigned
+  inputs, SIGHASH_ALL, witness and previous-transaction consistency, amount
+  bounds and the input/output arithmetic. Accepted PSBTs must re-serialize and
+  parse again.
 
 Crashes land in `fuzz/artifacts/<target>/`. Reproduce with:
 
@@ -28,5 +33,5 @@ Crashes land in `fuzz/artifacts/<target>/`. Reproduce with:
 cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<file>
 ```
 
-Still to add: PSBT verification and keystore JSON need pure adapters before they
-can be fuzzed through the library surface; current unit tests cover their bounds.
+Still to add: keystore JSON needs a pure adapter before it can be fuzzed through
+the library surface; current unit tests cover its bounds.

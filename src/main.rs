@@ -3,6 +3,7 @@ mod hardening;
 mod keystore;
 mod network;
 mod offline;
+mod psbt_guard;
 mod qr;
 mod send;
 mod ui;

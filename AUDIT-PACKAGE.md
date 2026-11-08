@@ -9,10 +9,12 @@ goal is to run on mainnet eventually, but only after the exit criteria at the bo
 ## Target
 
 - Repository: Cairn (Rust, single binary).
-- Baseline commit: `721557d3418f18598767060607335f6cd95006c3` ("harden sefety"), tree
-  `b72e54741b716098dfb853e72fdf45aeb6c47e79`, branch `master`.
-- Second-pass fixes A-01..A-03 and this package are applied on top of that commit and may still be
-  uncommitted. **Pin the exact commit and tree hash in the engagement letter.**
+- Baseline commit: `826007a4078af770b6ff0a6a1e16be82e4027840` ("fuzzing"), tree
+  `68be2386f3b91a65b6cca996d20d3595d4f0f799`, branch `master`.
+- Second-pass fixes A-01..A-03 and the fuzz harness are committed in that tree. The third-pass
+  hardening (fee ceiling, prevout checks, best-effort `mlock`, PSBT fuzz target) is in the working
+  tree and must be committed before the engagement. **Pin the exact commit and tree hash in the
+  engagement letter.**
 - Version: `0.2.0`. Toolchain used for review: `rustc 1.98.1`, `cargo 1.98.1`. `Cargo.lock` is
   committed and all checks run with `--locked`.
 - Platform reviewed: Linux. The code is Unix-only and claims macOS and Termux compatibility.
@@ -26,9 +28,9 @@ In scope:
 | Keystore and KDF | `src/keystore.rs` | File format v1/v2, Argon2id parameters, ChaCha20-Poly1305, AAD binding, salt/nonce/ciphertext limits, error-oracle behaviour, zeroization. |
 | Derivation and signing | `src/wallet.rs` | BIP39 entropy handling, BIP32/BIP84 derivation, network/coin-type binding, `Signer` input checks, deterministic ECDSA. |
 | Transaction construction | `src/send.rs` | Address/amount parsing, coin selection, dust, fee arithmetic, change, SIGHASH_ALL, script/key match. |
-| PSBT and offline flow | `src/offline.rs` | PSBT creation, verification, signing, change classification, unsigned/signed comparison, file handling, broadcast. |
+| PSBT and offline flow | `src/offline.rs`, `src/psbt_guard.rs` | PSBT creation, verification, signing, change classification, unsigned/signed comparison, file handling, broadcast; wallet-independent structure and amount checks. |
 | QR transport | `src/qr.rs` | Frame parser bounds, checksum, reassembly, image parsing and decompression limits. |
-| Network and API | `src/esplora.rs` | URL chain guard, manual redirects, same-host enforcement, TLS-only client, JSON parsing bounds, UTXO/balance/history validation, failover. |
+| Network and API | `src/esplora.rs` | URL chain guard, manual redirects, same-host enforcement, TLS-only client, JSON parsing bounds, UTXO/balance/history validation, prevout cross-check, failover. |
 | Mainnet gate | `src/network.rs` | Marker/env opt-in, ownership and permission checks, typed confirmations, fail-closed composition. |
 | Local hardening | `src/hardening.rs` | rlimits, umask, private directories, atomic/symlink-safe writes. |
 | UI and CLI | `src/main.rs`, `src/ui.rs` | Password entry, seed display, secret screen, confirmations, argument parsing, idle lock. |
@@ -60,8 +62,8 @@ transaction the user approves.
 
 ## Existing review
 
-`SECURITY-REVIEW.md` records findings S-01..S-13 and the second-pass findings A-01..A-03, with status,
-impact and fixes. Auditors should treat those as claims to verify, not as conclusions.
+`SECURITY-REVIEW.md` records findings S-01..S-13, the second-pass findings A-01..A-03 and the
+third-pass hardening H-01..H-04, with status, impact and fixes. Auditors should treat those as claims to verify, not as conclusions.
 
 ## Reproduction
 
@@ -80,6 +82,7 @@ rustup toolchain install nightly --profile minimal
 cargo install cargo-fuzz --locked
 cargo +nightly fuzz run url_guard -- -max_total_time=300
 cargo +nightly fuzz run qr_frames -- -max_total_time=300
+cargo +nightly fuzz run psbt -- -max_total_time=300
 ```
 
 There are no network-dependent tests in the suite. The manual testnet flow uses a faucet and a
@@ -87,9 +90,9 @@ throwaway wallet: create -> receive -> sync -> send -> offline PSBT sign -> broa
 The mainnet gate can be exercised with a temporary `HOME` and `--enable-mainnet` / `--disable-mainnet`;
 `CAIRN_ENABLE_MAINNET=I_UNDERSTAND_UNAUDITED_MAINNET` opens the gate for one process.
 
-The `fuzz/` package currently covers the URL/redirect guard and the QR frame parser. PSBT and
-keystore verification still need pure adapters before they can be fuzzed; they are covered by unit
-tests for now and are the next harness additions.
+The `fuzz/` package covers the URL/redirect guard, the QR frame parser and PSBT deserialization plus
+`psbt_guard::check_structure` (shared with the offline verifier). Keystore JSON still needs a pure
+adapter before it can be fuzzed; it is covered by unit tests for now.
 
 ## Questions for the audit
 

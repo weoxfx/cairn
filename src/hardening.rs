@@ -29,6 +29,26 @@ pub fn init() {
     }
 }
 
+/// Best-effort `mlock` of a secret allocation. Returns `false` when the OS
+/// refuses (for example a low `RLIMIT_MEMLOCK`); callers must continue and must
+/// not treat this as a guarantee.
+pub fn lock_memory(ptr: *const u8, len: usize) -> bool {
+    if ptr.is_null() || len == 0 {
+        return false;
+    }
+    unsafe { libc::mlock(ptr as *const libc::c_void, len) == 0 }
+}
+
+/// Undo [`lock_memory`]. Safe to call even if locking failed.
+pub fn unlock_memory(ptr: *const u8, len: usize) {
+    if ptr.is_null() || len == 0 {
+        return;
+    }
+    unsafe {
+        let _ = libc::munlock(ptr as *const libc::c_void, len);
+    }
+}
+
 /// Create `dir` with mode 0700, or verify that an existing path is a real
 /// directory we can lock down. Symlinks and non-directories are refused.
 pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {

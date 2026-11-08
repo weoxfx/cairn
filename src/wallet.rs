@@ -148,12 +148,17 @@ impl Watch {
 ///
 /// The master key is kept for the life of the signer so BIP174 full derivation
 /// paths can be resolved. The account key is kept for normal address
-/// derivation so no extra secret copies are made per call. `Drop` erases both
+/// derivation so no extra secret copies are made per call. The heap allocation
+/// is locked with `mlock` when the OS allows it, and `Drop` erases both keys
 /// (best effort).
-pub struct Signer {
+struct SignerInner {
     master: Xpriv,
     account: Xpriv,
     network: Network,
+}
+
+pub struct Signer {
+    inner: Box<SignerInner>,
 }
 
 impl Signer {
@@ -169,24 +174,31 @@ impl Signer {
                 return Err(e.to_string());
             }
         };
-        Ok(Signer {
+        let inner = Box::new(SignerInner {
             master,
             account,
             network,
-        })
+        });
+        // Best effort: keep the key material out of swap. If the OS refuses
+        // (for example a low RLIMIT_MEMLOCK), signing still proceeds.
+        crate::hardening::lock_memory(
+            inner.as_ref() as *const SignerInner as *const u8,
+            std::mem::size_of::<SignerInner>(),
+        );
+        Ok(Signer { inner })
     }
 
     pub fn network(&self) -> Network {
-        self.network
+        self.inner.network
     }
 
     pub fn account_xpub(&self) -> Result<String, String> {
-        Ok(Xpub::from_priv(&Secp256k1::new(), &self.account).to_string())
+        Ok(Xpub::from_priv(&Secp256k1::new(), &self.inner.account).to_string())
     }
 
     /// Master fingerprint, as used by BIP174 key origins.
     pub fn fingerprint(&self) -> Fingerprint {
-        self.master.fingerprint(&Secp256k1::new())
+        self.inner.master.fingerprint(&Secp256k1::new())
     }
 
     pub fn key_at(&self, chain: u32, index: u32) -> Result<(SecretKey, PublicKey), String> {
@@ -196,7 +208,7 @@ impl Signer {
             ChildNumber::from_normal_idx(chain).map_err(e)?,
             ChildNumber::from_normal_idx(index).map_err(e)?,
         ];
-        let mut child = self.account.derive_priv(&secp, &path).map_err(e)?;
+        let mut child = self.inner.account.derive_priv(&secp, &path).map_err(e)?;
         let mut kp = child.to_keypair(&secp);
         let sk = kp.secret_key();
         let pk = kp.public_key();
@@ -235,7 +247,7 @@ impl Signer {
                     "input {i} belongs to a different wallet (fingerprint mismatch)"
                 ));
             }
-            let (chain, index) = parse_bip84_path(path, self.network)
+            let (chain, index) = parse_bip84_path(path, self.inner.network)
                 .ok_or_else(|| format!("input {i} has an unexpected derivation path"))?;
             let utxo = input
                 .witness_utxo
@@ -286,8 +298,12 @@ impl Signer {
 impl Drop for Signer {
     fn drop(&mut self) {
         // Best-effort erase (the secp256k1 type has no automatic zeroize).
-        self.master.private_key.non_secure_erase();
-        self.account.private_key.non_secure_erase();
+        self.inner.master.private_key.non_secure_erase();
+        self.inner.account.private_key.non_secure_erase();
+        crate::hardening::unlock_memory(
+            self.inner.as_ref() as *const SignerInner as *const u8,
+            std::mem::size_of::<SignerInner>(),
+        );
     }
 }
 

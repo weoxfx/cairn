@@ -5,6 +5,7 @@
 //! network, fingerprint and KDF metadata in the AAD, so editing any of those fields
 //! makes decryption fail instead of silently relabelling a mainnet wallet.
 
+use crate::hardening;
 use argon2::{Algorithm, Argon2, Params, Version};
 use bip39::Mnemonic;
 use bitcoin::bip32::Xpriv;
@@ -55,11 +56,21 @@ pub struct Keystore {
     pub network: String,
 }
 
-/// A successfully decrypted wallet. The mnemonic is zeroized on drop by `bip39`.
+/// A successfully decrypted wallet. The mnemonic lives in a locked allocation
+/// (best effort) and is zeroized on drop by `bip39`.
 pub struct Opened {
-    pub mnemonic: Mnemonic,
+    pub mnemonic: Box<Mnemonic>,
     pub fingerprint: String,
     pub network: Network,
+}
+
+impl Drop for Opened {
+    fn drop(&mut self) {
+        hardening::unlock_memory(
+            self.mnemonic.as_ref() as *const Mnemonic as *const u8,
+            std::mem::size_of::<Mnemonic>(),
+        );
+    }
 }
 
 fn network_id(network: Network) -> Result<&'static str, String> {
@@ -363,11 +374,15 @@ pub fn open(name: &str, password: &str) -> Result<Opened, String> {
     };
 
     let entropy = Zeroizing::new(plain);
-    let mnemonic = Mnemonic::from_entropy(&entropy).map_err(|_| bad())?;
+    let mnemonic = Box::new(Mnemonic::from_entropy(&entropy).map_err(|_| bad())?);
     let fp = fingerprint(&mnemonic, network)?;
     if fp != ks.fingerprint {
         return Err(bad());
     }
+    hardening::lock_memory(
+        mnemonic.as_ref() as *const Mnemonic as *const u8,
+        std::mem::size_of::<Mnemonic>(),
+    );
     Ok(Opened {
         mnemonic,
         fingerprint: fp,
