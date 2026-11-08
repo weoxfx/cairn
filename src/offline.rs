@@ -494,7 +494,8 @@ pub fn broadcast(unsigned_path: String, signed_path: String) -> Result<(), Strin
             pause();
             Ok(())
         }
-        Err(e) => Err(format!("Not sent: {e}")),
+        Err(e) if e.starts_with("REJECTED:") => Err(e),
+        Err(e) => Err(format!("Broadcast status unknown: {e}")),
     }
 }
 

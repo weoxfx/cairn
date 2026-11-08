@@ -261,9 +261,12 @@ fn is_invisible(c: char) -> bool {
 fn read_body(resp: ureq::Response) -> Result<String, String> {
     let mut body = String::new();
     resp.into_reader()
-        .take(MAX_BODY)
+        .take(MAX_BODY + 1)
         .read_to_string(&mut body)
         .map_err(|e| format!("read error: {e}"))?;
+    if body.len() as u64 > MAX_BODY {
+        return Err("server response exceeds the size limit".into());
+    }
     Ok(body)
 }
 
@@ -306,7 +309,8 @@ fn resolve_redirect(base: &str, location: &str) -> Result<String, String> {
         return Err("redirect target contains control or ambiguous characters".into());
     }
     let location = location.trim();
-    let (host, path) = url_parts(base).ok_or("invalid API URL")?;
+    let (_, path) = url_parts(base).ok_or("invalid API URL")?;
+    let authority = authority_of(base).ok_or("invalid API URL")?;
     if location.is_empty() {
         return Err("empty redirect target".into());
     }
@@ -324,17 +328,17 @@ fn resolve_redirect(base: &str, location: &str) -> Result<String, String> {
         return Ok(out);
     }
     if location.starts_with('/') {
-        return Ok(format!("https://{host}{location}"));
+        return Ok(format!("https://{authority}{location}"));
     }
     if location.starts_with('?') {
         let bare = path.split('?').next().unwrap_or(path);
-        return Ok(format!("https://{host}{bare}{location}"));
+        return Ok(format!("https://{authority}{bare}{location}"));
     }
     let dir = match path.rfind('/') {
         Some(i) => &path[..=i],
         None => "/",
     };
-    Ok(format!("https://{host}{dir}{location}"))
+    Ok(format!("https://{authority}{dir}{location}"))
 }
 
 enum GetStep {
@@ -372,20 +376,17 @@ fn pace() {
 }
 
 /// GET with manual redirect handling. A redirect may only stay on the same
-/// host and must still satisfy the chain guard, so a provider cannot hand our
+/// origin and must still satisfy the chain guard, so a provider cannot hand our
 /// requests (and metadata) to an unrelated host.
 fn http_get(net: Net, url: &str) -> Result<String, String> {
     pace();
-    let origin = host_of(url).ok_or("invalid API URL")?.to_ascii_lowercase();
+    authority_of(url).ok_or("invalid API URL")?;
     let mut current = url.to_string();
     for _ in 0..=MAX_REDIRECTS {
         match one_get(&current)? {
             GetStep::Body(body) => return Ok(body),
             GetStep::Redirect(next) => {
-                let same_host = host_of(&next)
-                    .map(|h| h.eq_ignore_ascii_case(&origin))
-                    .unwrap_or(false);
-                if !same_host || !looks_like_url_for(net, &next) {
+                if !same_origin(url, &next) || !looks_like_url_for(net, &next) {
                     return Err("refusing API redirect to another host or chain".into());
                 }
                 current = next;
@@ -409,29 +410,44 @@ fn http_post(url: &str, body: &str) -> Result<String, String> {
     }
 }
 
-fn host_of(url: &str) -> Option<&str> {
-    url_parts(url).map(|(host, _)| host)
+fn same_origin(a: &str, b: &str) -> bool {
+    match (authority_of(a), authority_of(b)) {
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+        _ => false,
+    }
 }
 
-fn url_parts(p: &str) -> Option<(&str, &str)> {
+fn authority_of(p: &str) -> Option<&str> {
     if !url_chars_ok(p) {
         return None;
     }
     let rest = p.strip_prefix("https://")?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if authority.is_empty() {
+    if authority.is_empty() || authority.contains('@') {
         return None;
     }
-    let host_port = authority.rsplit('@').next().unwrap_or(authority);
     // Reject IPv6 authorities instead of splitting on ':' and comparing only
     // the first hextet. This guard only accepts hostnames and IPv4 literals.
-    if host_port.starts_with('[') || host_port.contains(']') || host_port.matches(':').count() > 1 {
+    if authority.starts_with('[') || authority.contains(']') || authority.matches(':').count() > 1 {
         return None;
     }
-    let host = host_port.split(':').next().unwrap_or(host_port);
+    let mut parts = authority.split(':');
+    let host = parts.next().unwrap_or("");
     if host.is_empty() {
         return None;
     }
+    if let Some(port) = parts.next() {
+        if port.is_empty() {
+            return None;
+        }
+    }
+    Some(authority)
+}
+
+fn url_parts(p: &str) -> Option<(&str, &str)> {
+    let authority = authority_of(p)?;
+    let rest = p.strip_prefix("https://")?;
+    let host = authority.split(':').next().unwrap_or(authority);
     let path = rest.strip_prefix(authority).unwrap_or("");
     Some((host, path))
 }
@@ -453,8 +469,8 @@ fn url_chars_ok(s: &str) -> bool {
 pub fn fuzz_url(base: &str, location: &str) {
     let _ = url_parts(base);
     let _ = url_parts(location);
-    let _ = host_of(base);
-    let _ = host_of(location);
+    let _ = authority_of(base);
+    let _ = authority_of(location);
     for net in [Net::Mainnet, Net::Testnet4, Net::Testnet3, Net::Signet] {
         let _ = looks_like_url_for(net, base);
         let _ = looks_like_url_for(net, location);
@@ -479,21 +495,34 @@ fn is_testnet_segment(seg: &str) -> bool {
     )
 }
 
-/// Chain-aware URL guard. Testnets must name a test network; mainnet must be
-/// HTTPS and must not name a test network. This stops the common accident of
-/// pointing a wallet at the other chain; it does not prove what a server serves.
+fn chain_segments(net: Net) -> &'static [&'static str] {
+    match net {
+        Net::Mainnet => &[],
+        Net::Testnet4 => &["testnet4"],
+        Net::Testnet3 => &["testnet", "testnet3"],
+        Net::Signet => &["signet"],
+    }
+}
+
+/// Chain-aware URL guard. Each testnet must name its own chain; mainnet must be
+/// HTTPS and must not name any test network. This stops the common accident of
+/// pointing a wallet at another chain; it does not prove what a server serves.
 fn looks_like_url_for(net: Net, p: &str) -> bool {
     let Some((host, path)) = url_parts(p) else {
         return false;
     };
-    let names_testnet = host
-        .split('.')
-        .chain(path.split(['/', '?', '#']))
-        .any(is_testnet_segment);
+    let path_only = path.split(['?', '#']).next().unwrap_or(path);
     if net.is_mainnet() {
-        !names_testnet
+        // Keep checking the whole path and query for mainnet: a testnet name
+        // anywhere in a mainnet API URL is a misconfiguration or a bypass.
+        !host
+            .split('.')
+            .chain(path.split(['/', '?', '#', '&', '=']))
+            .any(is_testnet_segment)
     } else {
-        names_testnet
+        let mut segments = host.split('.').chain(path_only.split('/'));
+        let wanted = chain_segments(net);
+        segments.any(|seg| wanted.iter().any(|w| seg.eq_ignore_ascii_case(w)))
     }
 }
 
@@ -1086,12 +1115,13 @@ mod tests {
             Net::Mainnet,
             "https://user:pass@mempool.space/testnet/api"
         ));
-        assert!(looks_like_url_for(
+        // API credentials are not supported: userinfo is ambiguous and rejected.
+        assert!(!looks_like_url_for(
             Net::Mainnet,
             "https://user:pass@mempool.space/api"
         ));
 
-        // Testnets need an explicit test-network segment.
+        // Testnets need an explicit segment naming their own chain.
         assert!(!looks_like_url_for(Net::Testnet4, "https://"));
         assert!(!looks_like_url_for(Net::Testnet4, "https:///api"));
         assert!(!looks_like_url_for(
@@ -1099,8 +1129,57 @@ mod tests {
             "https://example.com/api"
         ));
         assert!(looks_like_url_for(
+            Net::Testnet4,
+            "https://mempool.space/testnet4/api"
+        ));
+        assert!(!looks_like_url_for(
+            Net::Testnet4,
+            "https://mempool.space/testnet/api"
+        ));
+        assert!(!looks_like_url_for(
+            Net::Testnet4,
+            "https://mempool.space/signet/api"
+        ));
+        assert!(looks_like_url_for(
+            Net::Testnet3,
+            "https://mempool.space/testnet/api"
+        ));
+        assert!(looks_like_url_for(
+            Net::Testnet3,
+            "https://mempool.space/testnet3/api"
+        ));
+        assert!(!looks_like_url_for(
+            Net::Testnet3,
+            "https://mempool.space/testnet4/api"
+        ));
+        assert!(looks_like_url_for(
             Net::Signet,
             "https://example.com/signet/api?x=1"
+        ));
+        assert_eq!(
+            authority_of("https://mempool.space:8443/api"),
+            Some("mempool.space:8443")
+        );
+        assert!(authority_of("https://user:pass@mempool.space/api").is_none());
+        assert!(same_origin(
+            "https://mempool.space/a",
+            "https://mempool.space/b"
+        ));
+        assert!(!same_origin(
+            "https://mempool.space:8443/a",
+            "https://mempool.space/b"
+        ));
+        assert!(!same_origin(
+            "https://user:pass@mempool.space/a",
+            "https://mempool.space/b"
+        ));
+        assert!(!looks_like_url_for(
+            Net::Testnet4,
+            "https://mempool.space/signet/api?next=/testnet4"
+        ));
+        assert!(!looks_like_url_for(
+            Net::Mainnet,
+            "https://mempool.space/api?chain=testnet"
         ));
     }
 
@@ -1162,6 +1241,15 @@ mod tests {
             resolve_redirect("https://mempool.space/testnet4/api", "tx").unwrap(),
             "https://mempool.space/testnet4/tx"
         );
+        assert_eq!(
+            resolve_redirect("https://mempool.space:8443/testnet4/api", "tx").unwrap(),
+            "https://mempool.space:8443/testnet4/tx"
+        );
+        assert!(resolve_redirect(
+            "https://mempool.space/testnet4/api",
+            "https://user:pass@mempool.space/testnet4/tx"
+        )
+        .is_err());
         assert!(resolve_redirect("http://mempool.space/api", "/api").is_err());
         assert!(resolve_redirect("https://mempool.space/api", "").is_err());
         assert!(resolve_redirect("https://mempool.space/api", "https://").is_err());

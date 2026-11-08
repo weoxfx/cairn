@@ -155,14 +155,14 @@ ciphertext lengths are checked before any KDF work. A forged file can still forc
 it can no longer request gigabytes of memory or minutes of CPU. An attacker who can already write the
 wallet file can also simply delete or corrupt it.
 
-### S-10 — Cross-host and malformed-host HTTPS redirects (fixed)
+### S-10 — Cross-origin and malformed-host HTTPS redirects (fixed)
 
 Automatic redirects are now disabled in the HTTP agent and followed manually. A redirect must stay on
-the same host, remain HTTPS and still pass the chain-aware URL guard; anything else fails closed.
-`--broadcast` refuses redirects entirely. The host parser also rejects IPv6 literals, whose
-colon-separated form cannot be compared safely as a hostname string. Redirect resolution has unit
-tests. The remaining exposure is same-host path changes by the provider, which cannot receive keys or
-change what a response means.
+the same origin (host and port), remain HTTPS and still pass the chain-specific URL guard; anything
+else fails closed. `--broadcast` refuses redirects entirely. The parser preserves the port on
+relative redirects, rejects userinfo and IPv6 literals, and compares the full authority. Redirect
+resolution and same-origin checks have unit tests. The remaining exposure is same-origin path changes
+by the provider, which cannot receive keys or change what a response means.
 
 ### S-11 — Mainnet marker is an accident guard (accepted)
 
@@ -220,8 +220,8 @@ A fresh adversarial pass over the hardening diff found three issues. All three a
 
 Accepted, not changed:
 
-- A same-host redirect can still change the port or add userinfo. It remains on the provider's host, no
-  keys are sent, and responses stay untrusted, so this is metadata exposure only.
+- A same-origin HTTPS redirect can still change the path. It remains on the provider's host and port,
+  no keys are sent, and responses stay untrusted, so this is metadata exposure only.
 - `--qr-show` / `--qr-scan` display a mainnet label inferred from an untrusted PSBT before opt-in. They
   never sign or use the network, and signing/broadcasting still pass the gate.
 - Directory creation and chmod have the usual same-user TOCTOU window. Same-user malware is outside the
@@ -291,7 +291,47 @@ was an AI-assisted review, not an independent audit. Triage:
   ANSI spoofing requires write access to the user's wallet directory (same-user, out of scope).
 - **INF-12 (Info, clean).** The reviewer's RustSec cross-check found no affected locked dependency.
 
-The fixes are in the working tree after `5c96ea2`; commit and re-tag before the next review.
+The fixes are committed in `1e87e5d`. A second source-only AI-assisted review at that commit found
+no blocking issue and re-confirmed the fixes and accepted residuals. It also lacked a Rust toolchain
+and saw no tag or earlier commits in its snapshot. The history and tag exist here, but
+`audit-2026-11-08` still points at the previous package commit `704bee7`; move it to the final
+package commit before the next engagement.
+
+## Latest external AI-assisted review triage (2026-11-08)
+
+A further source-only AI review of `1e87e5d` found no Critical/High code issue and one process
+problem. It was not an independent audit, and its snapshot again lacked tags/history. Findings:
+
+- **AUD-01 (Medium, process, open) — reproducibility.** The package and tag did not identify the
+  tree the reviewer examined. `AUDIT-PACKAGE.md` now records the code commit, and the final fixes
+  must be committed and the tag recreated on that commit before an engagement. This is not a code
+  vulnerability, but it blocks a reproducible audit.
+- **AUD-02 (Low, fixed) — testnet chain confusion.** The guard accepted any testnet name for any
+  testnet, so a Testnet4 wallet could follow a same-host redirect to `testnet`/`signet`. Each testnet
+  now requires its own segment (`testnet4`; `testnet`/`testnet3`; `signet`), and chain names in the
+  query string are ignored.
+- **AUD-03 (Low, fixed) — redirect authority loss.** Relative redirects dropped the port, and
+  same-host redirects with a different port or userinfo were accepted. Redirects now preserve the
+  authority, compare host and port, and reject userinfo. Regression assertions cover both.
+- **AUD-04 (Low, fixed) — display-network coupling.** The transaction screen used the cosmetic
+  display network instead of `watch.network()`; it now receives the wallet's actual network.
+- **AUD-05 (Low, fixed) — silent import typo.** Import parsed one hidden seed entry and printed only
+  the fingerprint. It now asks for the hidden phrase twice and saves nothing on a mismatch.
+- **AUD-06 (Info, fixed).** Broadcast failures that are not a definitive server rejection are now
+  reported as `Broadcast status unknown`, not `Not sent`.
+- **AUD-07 (Info, fixed).** A response body over the 2 MB cap now fails closed instead of being
+  silently truncated.
+- **AUD-08 (Info, accepted).** CI actions use mutable major tags. Pin commit SHAs before a release;
+  the runner inputs are not part of the wallet's trust boundary today.
+- **AUD-09 (Info, accepted).** Provider failover queries the same address set at each provider, so
+  every configured provider learns it. This is a privacy tradeoff of failover; use one trusted
+  provider or Tor when that matters.
+- **AUD-10 (Info, accepted).** Scanning stops at the configured gap and the 200-address ceiling. A
+  wallet with activity beyond that window needs a wider scan; this must be addressed before mainnet.
+- **AUD-11 (Info, fixed).** `Opened::drop` now zeroizes the mnemonic before releasing its `mlock`.
+
+The latest fixes are in the working tree after `1e87e5d`; commit them and re-pin before the next
+review.
 
 ## Fuzzing harness (2026-11-08)
 
@@ -306,10 +346,10 @@ and runs coverage-guided libFuzzer targets:
 - `psbt` — PSBT deserialization plus the shared structure/arithmetic checks; accepted PSBTs must
   re-serialize and parse again.
 
-Short smoke runs after the latest changes completed with no crashes or artifacts: `url_guard`
-completed 135,858 executions and `psbt` 67,843 in 10 seconds each. CI repeats each for 120 seconds
-weekly. This is a harness addition, not an audit. Keystore JSON still needs a pure adapter before it
-can be fuzzed through the library.
+Short smoke runs completed with no crashes or artifacts: the latest `url_guard` run after the
+chain/authority fixes did 121,403 executions, and `psbt` did 67,843, in 10 seconds each. CI repeats
+each for 120 seconds weekly. This is a harness addition, not an audit. Keystore JSON still needs a
+pure adapter before it can be fuzzed through the library.
 
 ## Positive observations
 

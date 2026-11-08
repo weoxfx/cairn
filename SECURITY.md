@@ -35,6 +35,7 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
 
 - **Seed generation:** 256 bits from the OS random source, BIP39, shown once on the alternate
   screen and then cleared.
+- **Seed import:** the hidden phrase must be entered twice; a mismatch saves nothing.
 - **Wallet file:** Argon2id (128 MB, 3 passes) then ChaCha20-Poly1305, mode 600 in a 700 folder,
   atomic writes that never follow a symlink. Symlinks and oversized files are refused; `~/.cairn`
   and its wallet directory must be real directories and are kept at mode 700. KDF parameters are
@@ -68,11 +69,11 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
   dimensions and decoding memory, and the resulting PSBT goes through the same offline verification
   before anything is signed.
 - **Network:** HTTPS-only certificate-verified requests. Redirects are followed manually and only
-  to the same host, with HTTPS and the chain guard re-checked; broadcasts refuse redirects
-  entirely. API authorities must be hostnames or IPv4 literals; IPv6 literals are rejected to avoid
-  host-parser differentials. Response size limits, request pacing, provider failover, and a
-  chain-aware URL guard: testnet wallets refuse mainnet endpoints, mainnet wallets refuse
-  testnet/signet endpoints.
+  to the same origin (host and port), with HTTPS and the chain-specific guard re-checked; broadcasts
+  refuse redirects entirely. API authorities must be hostnames or IPv4 literals; userinfo and IPv6
+  literals are rejected to avoid parser differentials. Testnet4, Testnet3 and Signet each require
+  their own URL segment, and mainnet rejects any testnet segment. Response size limits fail closed,
+  with request pacing, provider failover, and no cross-chain endpoints.
   Responses are treated as untrusted: amounts and balances are bounded, txids are validated and
   terminal control characters plus invisible Unicode format characters are stripped before server
   text reaches the screen. This prevents the common wrong-chain accident and response-driven
@@ -95,11 +96,14 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
   key types). Erasing is best-effort. The decrypted mnemonic and signer keys are `mlock`ed when the
   OS allows it, but locking can be refused (for example by `RLIMIT_MEMLOCK`) and is not a guarantee;
   a swapped or hibernated machine can still expose them in that case.
-- **API redirects:** the client refuses cross-host, non-HTTPS and broadcast redirects. Same-host
-  HTTPS redirects are still followed, so a malicious provider can change paths and metadata
-  exposure within its own host. No key material is sent, and responses remain untrusted.
-- Privacy against the API server: it sees your IP and the addresses you query. Use your own server
-  or Tor (planned).
+- **API redirects:** the client refuses cross-origin, non-HTTPS and broadcast redirects.
+  Same-origin HTTPS redirects are still followed, so a malicious provider can change paths and
+  metadata exposure within its own host and port. No key material is sent, and responses remain
+  untrusted.
+- Privacy against the API server: it sees your IP and the addresses you query. Provider failover
+  queries the same set at every configured provider. Use your own server or Tor (planned).
+- Address scanning stops at the configured gap and the 200-address ceiling. Activity beyond that
+  window may not appear until a wider scan is implemented.
 - Weak passwords, screen capture and shoulder surfing.
 - The mainnet opt-in marker can be deleted or forged by anyone who can write to your home directory.
   It is ignored if it is a symlink, not a regular file, owned by another user, or group/world-

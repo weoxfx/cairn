@@ -394,6 +394,15 @@ fn import_wallet() -> Result<(), String> {
             .interact()
             .map_err(|e| e.to_string())?,
     );
+    let again = Zeroizing::new(
+        Password::with_theme(&theme())
+            .with_prompt("Seed phrase again (hidden)")
+            .interact()
+            .map_err(|e| e.to_string())?,
+    );
+    if phrase.trim() != again.trim() {
+        return Err("Seed phrases do not match. Nothing was saved.".into());
+    }
     let mnemonic =
         Mnemonic::parse(phrase.trim()).map_err(|e| format!("Invalid seed phrase: {e}"))?;
     let password = ask_new_password()?;
@@ -600,7 +609,7 @@ fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
                 },
             },
             1 => receive_screen(watch, state.as_ref())?,
-            2 => transactions_screen(state.as_ref())?,
+            2 => transactions_screen(watch.network(), state.as_ref())?,
             3 => {
                 // Quick re-check of everything known; falls back to a full scan if nothing is cached.
                 let gap = if state.is_some() {
@@ -681,7 +690,10 @@ fn show_qr(addr: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn transactions_screen(state: Option<&esplora::WalletState>) -> Result<(), String> {
+fn transactions_screen(
+    network: Network,
+    state: Option<&esplora::WalletState>,
+) -> Result<(), String> {
     banner();
     println!("{}\n", style("Transactions").bold());
     let Some(s) = state else {
@@ -693,7 +705,7 @@ fn transactions_screen(state: Option<&esplora::WalletState>) -> Result<(), Strin
         println!("  No transactions yet.");
     } else {
         match spin("Loading transactions…", || {
-            esplora::transactions(esplora::net_for(ui::display_network())?, s)
+            esplora::transactions(esplora::net_for(network)?, s)
         }) {
             Ok(txs) => {
                 if txs.is_empty() {

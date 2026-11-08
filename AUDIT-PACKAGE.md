@@ -9,14 +9,17 @@ goal is to run on mainnet eventually, but only after the exit criteria at the bo
 ## Target
 
 - Repository: Cairn (Rust, single binary).
-- Baseline tag: `audit-2026-11-08`, created on the commit that contains this package.
-- Code commit: `5c96ea2996a0f1b8f4a903bf1c53c18ba632826b` ("security update"), tree
-  `b1bfa3651c66723ebaffc714b6e23fb264be7d46`, branch `master`.
-- Second-pass fixes A-01..A-03, the fuzz harness and the third-pass hardening (fee ceiling, prevout
-  checks, best-effort `mlock`, PSBT fuzz target) are committed in that code tree. The external
-  AI-assisted review fixes (IPv6 redirect rejection, duplicate outpoints, non-zero locktime and
-  negative mempool deltas) are in the working tree after that commit; commit and re-pin before the
-  next review. **Pin the tag, commit and tree hash in the engagement letter.**
+- Code commit: `1e87e5de388b03df97672065026008af339e8d6b` ("audit update"), tree
+  `f64d5ab283bc75334aed800d9b3f9c3dc3466650`, branch `master`.
+- Baseline tag: `audit-2026-11-08` currently points at the previous package commit `704bee7`;
+  move/recreate it on the final commit that contains this package and the latest fixes before the
+  engagement. **Pin the tag, commit and tree hash in the engagement letter.**
+- Second-pass fixes A-01..A-03, the fuzz harness, the third-pass hardening (fee ceiling, prevout
+  checks, best-effort `mlock`, PSBT fuzz target) and the prior external AI-assisted review fixes
+  (IPv6 redirect rejection, duplicate outpoints, non-zero locktime and negative mempool deltas) are
+  committed in that code tree. The latest review fixes (chain-specific URLs, authority-preserving
+  redirects, transaction-screen network, seed re-entry, body-size failure, drop ordering) are in the
+  working tree after it and must be committed before the next review.
 - Version: `0.2.0`. Toolchain used for review: `rustc 1.98.1`, `cargo 1.98.1`. `Cargo.lock` is
   committed and all checks run with `--locked`.
 - Platform reviewed: Linux. The code is Unix-only and claims macOS and Termux compatibility.
@@ -65,8 +68,8 @@ transaction the user approves.
 ## Existing review
 
 `SECURITY-REVIEW.md` records findings S-01..S-13, the second-pass findings A-01..A-03, the
-third-pass hardening H-01..H-04 and the external AI-assisted review triage (`audit.txt`; not an
-independent audit), with status, impact and fixes. Auditors should treat those as claims to verify,
+third-pass hardening H-01..H-04 and the external AI-assisted review triages, including AUD-01..AUD-11
+(not independent audits), with status, impact and fixes. Auditors should treat those as claims to verify,
 not as conclusions.
 
 ## Reproduction

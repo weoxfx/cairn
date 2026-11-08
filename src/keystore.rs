@@ -18,7 +18,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 // Defaults for new wallets (OWASP minimum is 19 MB / 2 passes; this is far above it).
 const MEM_KIB: u32 = 131_072;
@@ -66,6 +66,8 @@ pub struct Opened {
 
 impl Drop for Opened {
     fn drop(&mut self) {
+        // Wipe while the allocation is still locked, then release it.
+        self.mnemonic.zeroize();
         hardening::unlock_memory(
             self.mnemonic.as_ref() as *const Mnemonic as *const u8,
             std::mem::size_of::<Mnemonic>(),

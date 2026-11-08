@@ -528,7 +528,8 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
             pause();
             Ok(true)
         }
-        Err(e) => Err(format!("Not sent: {e}")),
+        Err(e) if e.starts_with("REJECTED:") => Err(e),
+        Err(e) => Err(format!("Broadcast status unknown: {e}")),
     }
 }
 
