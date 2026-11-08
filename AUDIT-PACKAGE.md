@@ -9,12 +9,12 @@ goal is to run on mainnet eventually, but only after the exit criteria at the bo
 ## Target
 
 - Repository: Cairn (Rust, single binary).
-- Baseline commit: `826007a4078af770b6ff0a6a1e16be82e4027840` ("fuzzing"), tree
-  `68be2386f3b91a65b6cca996d20d3595d4f0f799`, branch `master`.
-- Second-pass fixes A-01..A-03 and the fuzz harness are committed in that tree. The third-pass
-  hardening (fee ceiling, prevout checks, best-effort `mlock`, PSBT fuzz target) is in the working
-  tree and must be committed before the engagement. **Pin the exact commit and tree hash in the
-  engagement letter.**
+- Baseline tag: `audit-2026-11-08`, created on the commit that contains this package.
+- Code commit: `5c96ea2996a0f1b8f4a903bf1c53c18ba632826b` ("security update"), tree
+  `b1bfa3651c66723ebaffc714b6e23fb264be7d46`, branch `master`.
+- Second-pass fixes A-01..A-03, the fuzz harness and the third-pass hardening (fee ceiling, prevout
+  checks, best-effort `mlock`, PSBT fuzz target) are committed in that code tree. **Pin the tag,
+  commit and tree hash in the engagement letter.**
 - Version: `0.2.0`. Toolchain used for review: `rustc 1.98.1`, `cargo 1.98.1`. `Cargo.lock` is
   committed and all checks run with `--locked`.
 - Platform reviewed: Linux. The code is Unix-only and claims macOS and Termux compatibility.
