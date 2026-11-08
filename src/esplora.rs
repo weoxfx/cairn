@@ -132,7 +132,7 @@ pub fn load_config() {
         // cannot race with a swap.
         let Ok(f) = std::fs::OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(&p)
         else {
             return;
@@ -298,16 +298,28 @@ fn redirect_target(resp: &ureq::Response) -> Result<String, String> {
 /// Resolve a Location header against the request URL. Only standard forms are
 /// accepted; anything ambiguous fails closed rather than being guessed at.
 fn resolve_redirect(base: &str, location: &str) -> Result<String, String> {
+    // Validate the raw header value: trimming first could hide a control
+    // character that a URL parser would treat differently.
+    if !url_chars_ok(location) {
+        return Err("redirect target contains control or ambiguous characters".into());
+    }
     let location = location.trim();
     let (host, path) = url_parts(base).ok_or("invalid API URL")?;
     if location.is_empty() {
         return Err("empty redirect target".into());
     }
     if location.starts_with("https://") {
+        if url_parts(location).is_none() {
+            return Err("invalid absolute redirect target".into());
+        }
         return Ok(location.to_string());
     }
     if let Some(rest) = location.strip_prefix("//") {
-        return Ok(format!("https://{rest}"));
+        let out = format!("https://{rest}");
+        if url_parts(&out).is_none() {
+            return Err("invalid redirect target".into());
+        }
+        return Ok(out);
     }
     if location.starts_with('/') {
         return Ok(format!("https://{host}{location}"));
@@ -400,6 +412,9 @@ fn host_of(url: &str) -> Option<&str> {
 }
 
 fn url_parts(p: &str) -> Option<(&str, &str)> {
+    if !url_chars_ok(p) {
+        return None;
+    }
     let rest = p.strip_prefix("https://")?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     if authority.is_empty() {
@@ -407,8 +422,47 @@ fn url_parts(p: &str) -> Option<(&str, &str)> {
     }
     let host = authority.rsplit('@').next().unwrap_or(authority);
     let host = host.split(':').next().unwrap_or(host);
+    if host.is_empty() {
+        return None;
+    }
     let path = rest.strip_prefix(authority).unwrap_or("");
     Some((host, path))
+}
+
+/// Reject URLs whose meaning could differ between this parser and the HTTP
+/// client. The WHATWG parser treats `\` as `/` for https URLs, so a URL like
+/// `https://evil.example\@mempool.space/api` would connect to `evil.example`
+/// while a naive host check sees `mempool.space`. Fail closed instead.
+fn url_chars_ok(s: &str) -> bool {
+    !s.chars()
+        .any(|c| c.is_control() || c.is_whitespace() || c == '\\')
+}
+
+/// Fuzzing entry point: parse a configured URL and a redirect target, checking
+/// that the manual resolver cannot emit a URL the guard would misread. Enabled
+/// only by the `fuzzing` feature.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_url(base: &str, location: &str) {
+    let _ = url_parts(base);
+    let _ = url_parts(location);
+    let _ = host_of(base);
+    let _ = host_of(location);
+    for net in [Net::Mainnet, Net::Testnet4, Net::Testnet3, Net::Signet] {
+        let _ = looks_like_url_for(net, base);
+        let _ = looks_like_url_for(net, location);
+    }
+
+    if let Some((host, path)) = url_parts(location) {
+        assert!(url_chars_ok(host) && url_chars_ok(path));
+    }
+
+    if let Ok(out) = resolve_redirect(base, location) {
+        assert!(out.starts_with("https://"), "redirect escaped HTTPS: {out}");
+        assert!(url_chars_ok(&out), "ambiguous redirect target: {out}");
+        let (host, path) = url_parts(&out).expect("resolved URL must parse");
+        assert!(url_chars_ok(host) && url_chars_ok(path));
+    }
 }
 
 fn is_testnet_segment(seg: &str) -> bool {
@@ -575,8 +629,14 @@ fn scan_chain(
         for (i, (addr, info)) in addrs.into_iter().zip(infos).enumerate() {
             if info.tx_count > 0 {
                 gap = 0;
-                res.confirmed = res.confirmed.saturating_add(info.confirmed);
-                res.unconfirmed = res.unconfirmed.saturating_add(info.unconfirmed);
+                res.confirmed = res
+                    .confirmed
+                    .saturating_add(info.confirmed)
+                    .min(network::MAX_MONEY_SATS as i64);
+                res.unconfirmed = res
+                    .unconfirmed
+                    .saturating_add(info.unconfirmed)
+                    .min(network::MAX_MONEY_SATS as i64);
                 res.used.push(addr);
                 res.next = idx + i as u32 + 1;
             } else {
@@ -608,8 +668,14 @@ pub fn sync(
     let mut used = r.used;
     used.extend(c.used);
     Ok(WalletState {
-        confirmed: r.confirmed.saturating_add(c.confirmed),
-        unconfirmed: r.unconfirmed.saturating_add(c.unconfirmed),
+        confirmed: r
+            .confirmed
+            .saturating_add(c.confirmed)
+            .min(network::MAX_MONEY_SATS as i64),
+        unconfirmed: r
+            .unconfirmed
+            .saturating_add(c.unconfirmed)
+            .min(network::MAX_MONEY_SATS as i64),
         used,
         next_receive: r.next,
         next_change: c.next,
@@ -855,6 +921,16 @@ mod tests {
         assert!(!looks_like_url_for(Net::Mainnet, "ftp://mempool.space/api"));
         assert!(!looks_like_url_for(Net::Mainnet, "mempool.space/api"));
 
+        // A WHATWG parser treats `\` as `/`; the guard must not be fooled.
+        assert!(!looks_like_url_for(
+            Net::Mainnet,
+            "https://evil.example\\@mempool.space/api"
+        ));
+        assert!(!looks_like_url_for(
+            Net::Mainnet,
+            "https://mempool.space/api\n"
+        ));
+
         // A testnet name anywhere in the host or path disqualifies mainnet.
         assert!(!looks_like_url_for(
             Net::Mainnet,
@@ -946,5 +1022,18 @@ mod tests {
         );
         assert!(resolve_redirect("http://mempool.space/api", "/api").is_err());
         assert!(resolve_redirect("https://mempool.space/api", "").is_err());
+        assert!(resolve_redirect("https://mempool.space/api", "https://").is_err());
+        assert!(resolve_redirect("https://mempool.space/api", "//").is_err());
+        assert!(resolve_redirect(
+            "https://mempool.space/api",
+            "https://evil.example\\@mempool.space/api"
+        )
+        .is_err());
+        assert!(resolve_redirect(
+            "https://mempool.space/api",
+            "//evil.example\\@mempool.space/api"
+        )
+        .is_err());
+        assert!(resolve_redirect("https://mempool.space/api", "/api\n").is_err());
     }
 }

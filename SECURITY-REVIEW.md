@@ -198,6 +198,46 @@ Beyond the findings above, the same pass also:
 - Capped a `--qr-scan` invocation at 1024 images.
 - Took the HTTP user agent from `CARGO_PKG_VERSION` instead of a hard-coded version that could drift.
 
+## Second-pass review (2026-11-08)
+
+A fresh adversarial pass over the hardening diff found three issues. All three are fixed in this tree:
+
+- **A-01 (Low, fixed) — URL parser differential.** The manual redirect check parsed hosts itself, while the
+  HTTP client uses the WHATWG URL parser. In a URL such as `https://evil.example\@mempool.space/api`
+  the client treats `\` as a path separator and connects to `evil.example`, while the check saw
+  `mempool.space` and allowed the redirect. URLs containing control characters, whitespace or
+  backslashes are now rejected before parsing, so the same-host comparison and the actual connection
+  agree. Covered by assertions in the URL-guard and redirect tests.
+- **A-02 (Info, fixed) — aggregate display balance.** Per-address balances were capped at 21M BTC, but a
+  collection of lying responses could still display more. Synced totals are now capped as well.
+- **A-03 (Low, fixed) — FIFO config hang.** `~/.cairn/config` was opened with `O_NOFOLLOW` but without
+  `O_NONBLOCK`, so a planted FIFO could block startup before the regular-file check. The config is now
+  opened non-blocking, like wallet and PSBT files.
+
+Accepted, not changed:
+
+- A same-host redirect can still change the port or add userinfo. It remains on the provider's host, no
+  keys are sent, and responses stay untrusted, so this is metadata exposure only.
+- `--qr-show` / `--qr-scan` display a mainnet label inferred from an untrusted PSBT before opt-in. They
+  never sign or use the network, and signing/broadcasting still pass the gate.
+- Directory creation and chmod have the usual same-user TOCTOU window. Same-user malware is outside the
+  threat model.
+
+## Fuzzing harness (2026-11-08)
+
+`fuzz/` links the real parser modules through a new library target (`src/lib.rs`, `[lib] test = false`)
+and runs coverage-guided libFuzzer targets:
+
+- `url_guard` — URL/redirect parsing. Asserts resolved targets stay HTTPS, contain no control
+  characters, whitespace or backslashes, and always parse. Also covers malformed absolute targets
+  such as `https://` and `//`, which `resolve_redirect` now rejects instead of returning them.
+- `qr_frames` — arbitrary frame lists; accepted payloads are re-encoded and must round-trip
+  byte-identically.
+
+A 20-second smoke run of each target completed with no crashes and no artifacts; CI repeats each for
+120 seconds weekly. This is a harness addition, not an audit. PSBT and keystore verification need pure
+adapters before they can be fuzzed and are the next target.
+
 ## Positive observations
 
 - The keystore uses Argon2id and ChaCha20-Poly1305 from RustCrypto, with random salt and nonce per

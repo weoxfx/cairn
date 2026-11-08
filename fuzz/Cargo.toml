@@ -1,0 +1,28 @@
+[package]
+name = "cairn-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cairn = { path = "..", features = ["fuzzing"] }
+
+[[bin]]
+name = "url_guard"
+path = "fuzz_targets/url_guard.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qr_frames"
+path = "fuzz_targets/qr_frames.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
