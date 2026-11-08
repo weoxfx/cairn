@@ -1,9 +1,5 @@
 # Security policy
 
-**Status: experimental. Independent AI-assisted source review completed; no third-party audit.
-Testnet is the default. Mainnet is available but is not recommended for real funds until a
-third-party audit is complete.**
-
 ## Mainnet selection
 
 Mainnet is not the default. It is chosen when creating or importing a wallet, without a marker file
