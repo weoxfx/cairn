@@ -29,7 +29,7 @@ All of the following passed after the fixes in this document:
 ```
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --release -- --test-threads=1   # 41 passed
+cargo test --locked --release -- --test-threads=1   # 47 passed
 cargo audit                                        # 0 vulnerabilities, 155 dependencies
 cargo build --locked --release
 ```
@@ -57,7 +57,7 @@ or require an independent audit to assess properly.
 | S-07 | Low | CI workflow would not run on GitHub | Fixed |
 | S-08 | Low | Mainnet banner state after cancelling confirmation | Fixed |
 | S-09 | Low | KDF upper bound allows local 1 GiB work factor | Fixed (bounded) |
-| S-10 | Info | Cross-host HTTPS redirects | Fixed |
+| S-10 | Info | Cross-host / malformed-host HTTPS redirects | Fixed |
 | S-11 | Info | Mainnet marker is forgeable by same-user malware | Accepted |
 | S-12 | Info | No `mlock`; terminal wiping is best effort | Mitigated (best effort) |
 | S-13 | Info | Testnet variants share coin type 1 and URL-based identification | Accepted |
@@ -155,12 +155,14 @@ ciphertext lengths are checked before any KDF work. A forged file can still forc
 it can no longer request gigabytes of memory or minutes of CPU. An attacker who can already write the
 wallet file can also simply delete or corrupt it.
 
-### S-10 — Cross-host HTTPS redirects (fixed)
+### S-10 — Cross-host and malformed-host HTTPS redirects (fixed)
 
 Automatic redirects are now disabled in the HTTP agent and followed manually. A redirect must stay on
 the same host, remain HTTPS and still pass the chain-aware URL guard; anything else fails closed.
-`--broadcast` refuses redirects entirely. Redirect resolution has unit tests. The remaining exposure
-is same-host path changes by the provider, which cannot receive keys or change what a response means.
+`--broadcast` refuses redirects entirely. The host parser also rejects IPv6 literals, whose
+colon-separated form cannot be compared safely as a hostname string. Redirect resolution has unit
+tests. The remaining exposure is same-host path changes by the provider, which cannot receive keys or
+change what a response means.
 
 ### S-11 — Mainnet marker is an accident guard (accepted)
 
@@ -195,8 +197,8 @@ Beyond the findings above, the same pass also:
   file owned by the user and not group/world-writable.
 - Extended server-text sanitisation to invisible Unicode format characters in addition to control
   characters.
-- Bounded per-address API balances to the 21 million BTC supply and rejected negative values, so a
-  lying server cannot display an impossible balance.
+- Bounded per-address API balances to the 21 million BTC supply and represent negative mempool
+  deltas without allowing a negative total, so a lying server cannot display an impossible balance.
 - Capped a `--qr-scan` invocation at 1024 images.
 - Took the HTTP user agent from `CARGO_PKG_VERSION` instead of a hard-coded version that could drift.
 
@@ -244,6 +246,53 @@ Accepted, not changed:
   wallet-independent structural and arithmetic checks used by the offline verifier, and `fuzz/psbt`
   exercises deserialization plus those checks.
 
+## External AI-assisted review triage (2026-11-08)
+
+An external AI reviewer produced `audit.txt` against code commit `5c96ea2`. It had no Rust toolchain,
+so it read the source and ran Python PoCs but could not execute this test suite or the fuzzers. This
+was an AI-assisted review, not an independent audit. Triage:
+
+- **BLOCK-01 (High, fixed) — IPv6 same-host redirect bypass.** `url_parts` split an authority at the
+  first `:`, so `[2001:db8::1]` became `[2001`; two different IPv6 hosts could compare equal. The
+  parser now rejects bracketed and unbracketed IPv6 authorities before the same-host check; API URLs
+  must be hostnames or IPv4 literals. Regression assertions cover `[2001:db8::1]`, `[::1]` and an
+  unbracketed literal.
+- **BLOCK-02 (Medium, no code change) — missing tag/history.** The reviewer's snapshot had one commit
+  and no tags; this repository has `826007a` and `audit-2026-11-08` (the audit-package commit).
+  Re-running the review at the tag resolves it.
+- **INF-01 (Info, accepted).** The 10,000-sat floor intentionally allows a normal minimum fee on
+  dust-sized sends; a 10,000-sat fee on a 294-sat output is still shown with its sat/vB and a
+  percentage warning, and the absolute 1,000,000-sat cap remains. Lowering the floor would reject
+  legitimate small sends at relay-feasible rates.
+- **INF-02 (Info, fixed).** `psbt_guard::check_structure` and `send::plan` now reject repeated
+  outpoints; offline and online selection have regression tests and the PSBT fuzzer exercises the
+  shared check.
+- **INF-03 (Info, accepted).** Offline verification must trust the PSBT's witness UTXO values; BIP143
+  commits to them, so a lie makes the signature invalid. The review screen states this and the online
+  side re-fetches prevouts. This remains documented residual risk.
+- **INF-04 (Info, fixed).** The offline verifier and `--broadcast` reject a non-zero locktime. Cairn
+  builds immediate transactions only; this prevents a PSBT from freezing funds until a future
+  height/time.
+- **INF-05 (Info, fixed).** A negative mempool delta is legitimate when an address spends a confirmed
+  coin. It is no longer clamped to zero; pending totals are allowed to go negative but never below a
+  zero confirmed balance.
+- **INF-06 (Info, accepted).** A PSBT can influence the cosmetic network banner before the signature
+  gate; no key or signing decision uses that label. Accepted as display-only, as before.
+- **INF-07 (Info, accepted).** The file is chmod 0600 before authentication. This reduces ciphertext
+  exposure while the password prompt is open; a different local user cannot read it and same-user
+  malware is out of scope.
+- **INF-08 (Info, fixed).** The derived `SecretKey` used only to compare public keys in
+  `verify_psbt` is now erased immediately.
+- **INF-09 (Info, accepted).** Testnet4, Testnet3 and Signet share coin type 1; the operator selects
+  the network and the URL guard separates it from mainnet. Documented limitation.
+- **INF-10 (Info, accepted).** The 5-minute lock covers the watch-only dashboard menu; the seed has
+  already been dropped, and QR/PSBT screens are separate commands. No spending key is held there.
+- **INF-11 (Info, accepted).** Wallet stems are displayed from a 0700 directory and never executed;
+  ANSI spoofing requires write access to the user's wallet directory (same-user, out of scope).
+- **INF-12 (Info, clean).** The reviewer's RustSec cross-check found no affected locked dependency.
+
+The fixes are in the working tree after `5c96ea2`; commit and re-tag before the next review.
+
 ## Fuzzing harness (2026-11-08)
 
 `fuzz/` links the real parser modules through a new library target (`src/lib.rs`, `[lib] test = false`)
@@ -257,9 +306,10 @@ and runs coverage-guided libFuzzer targets:
 - `psbt` — PSBT deserialization plus the shared structure/arithmetic checks; accepted PSBTs must
   re-serialize and parse again.
 
-A 20-second smoke run of each target completed with no crashes and no artifacts; the PSBT target
-completed 182,288 executions. CI repeats each for 120 seconds weekly. This is a harness addition, not
-an audit. Keystore JSON still needs a pure adapter before it can be fuzzed through the library.
+Short smoke runs after the latest changes completed with no crashes or artifacts: `url_guard`
+completed 135,858 executions and `psbt` 67,843 in 10 seconds each. CI repeats each for 120 seconds
+weekly. This is a harness addition, not an audit. Keystore JSON still needs a pure adapter before it
+can be fuzzed through the library.
 
 ## Positive observations
 

@@ -45,19 +45,20 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
 - **Session:** after unlock only the public account key is kept. The decrypted mnemonic and the
   signer's key allocation are held in `mlock`ed heap allocations when the OS allows it, and erased
   on drop. Temporary private keys derived while building the watch-only view are erased. The
-  network code never has access to anything that can spend. The session re-locks after 5 minutes
-  idle.
+  network code never has access to anything that can spend. The watch-only dashboard re-locks after
+  5 minutes idle.
 - **Sending:** password re-entry, keys must match the wallet session and each coin's script, amounts
-  are checked to add up and capped at 21 million BTC. Selected coins are re-checked against the
-  transaction that created them (value and address must match) before review. A fee ceiling rejects
+  are checked to add up and capped at 21 million BTC. Duplicate coins are rejected, and selected
+  coins are re-checked against the transaction that created them (value and address must match)
+  before review. A fee ceiling rejects
   more than 10% of the recipient amount (with a 10,000-sat floor for ordinary small sends) or more
   than 1,000,000 sats absolute. Explicit `SEND` confirmation and deterministic signatures.
   Server-provided txids are validated before display.
 - **Offline signing:** `--offline` performs no network I/O. It rejects an already-signed PSBT,
   checks every input belongs to the loaded wallet with an `m/84'/coin'/0'/chain/index` key origin
-  for the wallet's network and a matching P2WPKH script, classifies change against the wallet's
-  addresses, rejects amounts above the money supply, enforces a minimum fee and the fee ceiling, and
-  requires `SEND`.
+  for the wallet's network and a matching P2WPKH script, rejects duplicate inputs and non-zero
+  locktimes, classifies change against the wallet's addresses, rejects amounts above the money
+  supply, enforces a minimum fee and the fee ceiling, and requires `SEND`.
   PSBT files are capped at 5 MB, must be regular files and are opened with `O_NOFOLLOW` (no FIFOs or
   symlinks); signed output is written atomically with mode 600. The online `--broadcast` step
   rejects a signed PSBT whose unsigned transaction or input metadata differs from the unsigned file
@@ -68,8 +69,10 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
   before anything is signed.
 - **Network:** HTTPS-only certificate-verified requests. Redirects are followed manually and only
   to the same host, with HTTPS and the chain guard re-checked; broadcasts refuse redirects
-  entirely. Response size limits, request pacing, provider failover, and a chain-aware URL guard:
-  testnet wallets refuse mainnet endpoints, mainnet wallets refuse testnet/signet endpoints.
+  entirely. API authorities must be hostnames or IPv4 literals; IPv6 literals are rejected to avoid
+  host-parser differentials. Response size limits, request pacing, provider failover, and a
+  chain-aware URL guard: testnet wallets refuse mainnet endpoints, mainnet wallets refuse
+  testnet/signet endpoints.
   Responses are treated as untrusted: amounts and balances are bounded, txids are validated and
   terminal control characters plus invisible Unicode format characters are stripped before server
   text reaches the screen. This prevents the common wrong-chain accident and response-driven

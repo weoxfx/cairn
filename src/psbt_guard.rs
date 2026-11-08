@@ -7,6 +7,7 @@
 use crate::network;
 use bitcoin::psbt::Psbt;
 use bitcoin::EcdsaSighashType;
+use std::collections::HashSet;
 
 /// Check structure, signedness, previous-transaction consistency and amounts.
 /// Returns `(total_in, total_out)` in sats. Ownership, scripts and keys are
@@ -18,7 +19,11 @@ pub fn check_structure(psbt: &Psbt) -> Result<(u64, u64), String> {
     }
 
     let mut total_in = 0u64;
+    let mut outpoints = HashSet::new();
     for (i, (txin, input)) in tx.input.iter().zip(&psbt.inputs).enumerate() {
+        if !outpoints.insert(txin.previous_output) {
+            return Err(format!("input {i} repeats an outpoint"));
+        }
         if !txin.script_sig.is_empty() || !txin.witness.is_empty() {
             return Err(format!("input {i} is not unsigned"));
         }

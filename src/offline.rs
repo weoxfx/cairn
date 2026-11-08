@@ -13,7 +13,7 @@ use crate::ui::{banner, boxed, fmt_btc, menu, ok, pause, spin};
 use crate::wallet::{parse_bip84_path, Signer, Watch};
 use bitcoin::bip32::{ChildNumber, Fingerprint};
 use bitcoin::psbt::Psbt;
-use bitcoin::{Address, CompressedPublicKey, Network, ScriptBuf};
+use bitcoin::{absolute::LockTime, Address, CompressedPublicKey, Network, ScriptBuf};
 use console::style;
 use dialoguer::Input;
 use std::collections::HashSet;
@@ -27,6 +27,18 @@ const MAX_PSBT_BYTES: u64 = 5_000_000; // plenty for any real PSBT, bounded for 
 
 fn fee_for(rate: f64, vbytes: u64) -> u64 {
     (rate * vbytes as f64).ceil() as u64
+}
+
+/// Cairn only signs immediate transactions. A non-zero locktime from an
+/// untrusted PSBT could freeze funds until a future height or timestamp.
+fn check_immediate(psbt: &Psbt) -> Result<(), String> {
+    if psbt.unsigned_tx.lock_time != LockTime::ZERO {
+        return Err(
+            "PSBT has a non-zero locktime; Cairn only signs or broadcasts immediate transactions"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 // ---------- online: create the unsigned PSBT ----------
@@ -257,6 +269,7 @@ fn verify_psbt(
     // Structure, signedness, previous-transaction consistency and arithmetic
     // are wallet-independent and shared with the fuzzer.
     let (total_in, total_out) = crate::psbt_guard::check_structure(psbt)?;
+    check_immediate(psbt)?;
     let tx = &psbt.unsigned_tx;
     let master_fp = signer.fingerprint();
 
@@ -282,7 +295,8 @@ fn verify_psbt(
         if expected_script != utxo.script_pubkey {
             return Err(format!("input {i}: key does not match the coin's script"));
         }
-        let (_, derived_pubkey) = signer.key_at(chain, index)?;
+        let (mut derived_sk, derived_pubkey) = signer.key_at(chain, index)?;
+        derived_sk.non_secure_erase();
         if derived_pubkey != *pubkey {
             return Err(format!("input {i}: key does not match this wallet"));
         }
@@ -395,6 +409,7 @@ pub fn broadcast(unsigned_path: String, signed_path: String) -> Result<(), Strin
     let unit = network::unit(network);
     let signed = read_psbt(&signed_path)?;
     ensure_same_unsigned(&unsigned, &signed)?;
+    check_immediate(&signed)?;
     if signed
         .inputs
         .iter()
@@ -771,6 +786,23 @@ mod tests {
             verify_psbt(&psbt, &watch, &signer, Network::Testnet).is_err(),
             "output above the money supply must be rejected"
         );
+    }
+
+    #[test]
+    fn rejects_duplicate_outpoints() {
+        let (mut psbt, watch, signer) = fixture(Network::Testnet);
+        let input = psbt.inputs[0].clone();
+        let txin = psbt.unsigned_tx.input[0].clone();
+        psbt.unsigned_tx.input.push(txin);
+        psbt.inputs.push(input);
+        assert!(verify_psbt(&psbt, &watch, &signer, Network::Testnet).is_err());
+    }
+
+    #[test]
+    fn rejects_nonzero_locktime() {
+        let (mut psbt, watch, signer) = fixture(Network::Testnet);
+        psbt.unsigned_tx.lock_time = bitcoin::absolute::LockTime::from_consensus(500_000_000);
+        assert!(verify_psbt(&psbt, &watch, &signer, Network::Testnet).is_err());
     }
 
     #[test]

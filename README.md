@@ -119,7 +119,7 @@ The usual PSBT review still happens after scanning.
 
 - **Network:** Settings in the main menu (Testnet4, Testnet3, Signet; Mainnet only appears after
   the opt-in and still asks for confirmation)
-- **Your own server:** `export CAIRN_API=https://your-server/testnet/api` (comma separated for several)
+- **Your own server:** `export CAIRN_API=https://your-server/testnet/api` (comma separated for several; use a hostname or IPv4 literal, not an IPv6 literal)
 
 ## Development
 

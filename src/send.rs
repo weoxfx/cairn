@@ -19,7 +19,7 @@ use bitcoin::{
 };
 use console::style;
 use dialoguer::Input;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const DUST: u64 = 294; // P2WPKH dust threshold in sats
 const MAX_MONEY: u64 = network::MAX_MONEY_SATS;
@@ -114,6 +114,12 @@ pub fn plan(
     rate: f64,
     change_addr: Address,
 ) -> Result<Plan, String> {
+    let mut seen = HashSet::new();
+    for u in &utxos {
+        if !seen.insert((u.txid, u.vout)) {
+            return Err("server returned the same coin more than once".into());
+        }
+    }
     utxos.sort_by_key(|a| std::cmp::Reverse(a.value));
     match amount {
         None => {
@@ -612,6 +618,13 @@ mod tests {
         assert_eq!(p.fee, 141);
         let c = p.change.as_ref().unwrap().1;
         assert_eq!(30_000 + p.fee + c, 100_000);
+    }
+
+    #[test]
+    fn plan_rejects_duplicate_coins() {
+        let (a0, to, change, _) = addrs(Network::Testnet);
+        let u = utxo(100_000, &a0);
+        assert!(plan(vec![u.clone(), u], to, Some(30_000), 1.0, change).is_err());
     }
 
     #[test]

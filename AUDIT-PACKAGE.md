@@ -13,8 +13,10 @@ goal is to run on mainnet eventually, but only after the exit criteria at the bo
 - Code commit: `5c96ea2996a0f1b8f4a903bf1c53c18ba632826b` ("security update"), tree
   `b1bfa3651c66723ebaffc714b6e23fb264be7d46`, branch `master`.
 - Second-pass fixes A-01..A-03, the fuzz harness and the third-pass hardening (fee ceiling, prevout
-  checks, best-effort `mlock`, PSBT fuzz target) are committed in that code tree. **Pin the tag,
-  commit and tree hash in the engagement letter.**
+  checks, best-effort `mlock`, PSBT fuzz target) are committed in that code tree. The external
+  AI-assisted review fixes (IPv6 redirect rejection, duplicate outpoints, non-zero locktime and
+  negative mempool deltas) are in the working tree after that commit; commit and re-pin before the
+  next review. **Pin the tag, commit and tree hash in the engagement letter.**
 - Version: `0.2.0`. Toolchain used for review: `rustc 1.98.1`, `cargo 1.98.1`. `Cargo.lock` is
   committed and all checks run with `--locked`.
 - Platform reviewed: Linux. The code is Unix-only and claims macOS and Termux compatibility.
@@ -62,8 +64,10 @@ transaction the user approves.
 
 ## Existing review
 
-`SECURITY-REVIEW.md` records findings S-01..S-13, the second-pass findings A-01..A-03 and the
-third-pass hardening H-01..H-04, with status, impact and fixes. Auditors should treat those as claims to verify, not as conclusions.
+`SECURITY-REVIEW.md` records findings S-01..S-13, the second-pass findings A-01..A-03, the
+third-pass hardening H-01..H-04 and the external AI-assisted review triage (`audit.txt`; not an
+independent audit), with status, impact and fixes. Auditors should treat those as claims to verify,
+not as conclusions.
 
 ## Reproduction
 

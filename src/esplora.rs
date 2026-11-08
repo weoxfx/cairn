@@ -422,8 +422,13 @@ fn url_parts(p: &str) -> Option<(&str, &str)> {
     if authority.is_empty() {
         return None;
     }
-    let host = authority.rsplit('@').next().unwrap_or(authority);
-    let host = host.split(':').next().unwrap_or(host);
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    // Reject IPv6 authorities instead of splitting on ':' and comparing only
+    // the first hextet. This guard only accepts hostnames and IPv4 literals.
+    if host_port.starts_with('[') || host_port.contains(']') || host_port.matches(':').count() > 1 {
+        return None;
+    }
+    let host = host_port.split(':').next().unwrap_or(host_port);
     if host.is_empty() {
         return None;
     }
@@ -581,13 +586,24 @@ pub struct AddrInfo {
 pub fn address_info(net: Net, addr: &str) -> Result<AddrInfo, String> {
     let v = get(net, &format!("/address/{addr}"))?;
     let delta = |k: &str| -> Result<i64, String> {
-        let funded = v[k]["funded_txo_sum"].as_i64().unwrap_or(0);
-        let spent = v[k]["spent_txo_sum"].as_i64().unwrap_or(0);
-        let value = funded.saturating_sub(spent);
-        if !(0..=network::MAX_MONEY_SATS as i64).contains(&value) {
+        let funded = v[k]["funded_txo_sum"].as_u64().unwrap_or(0);
+        let spent = v[k]["spent_txo_sum"].as_u64().unwrap_or(0);
+        let max = network::MAX_MONEY_SATS as i128;
+        if funded > network::MAX_MONEY_SATS || spent > network::MAX_MONEY_SATS {
             return Err("server returned an impossible balance".into());
         }
-        Ok(value)
+        // A mempool delta is legitimately negative when an address spends a
+        // confirmed coin; chain deltas are never negative. Don't clamp either.
+        let value = funded as i128 - spent as i128;
+        let allowed = if k == "mempool_stats" {
+            (-max..=max).contains(&value)
+        } else {
+            (0..=max).contains(&value)
+        };
+        if !allowed {
+            return Err("server returned an impossible balance".into());
+        }
+        Ok(value as i64)
     };
     let count = |k: &str| v[k]["tx_count"].as_u64().unwrap_or(0);
     Ok(AddrInfo {
@@ -669,15 +685,18 @@ pub fn sync(
     let c = c.map_err(|_| "worker panicked".to_string())??;
     let mut used = r.used;
     used.extend(c.used);
+    let confirmed = r
+        .confirmed
+        .saturating_add(c.confirmed)
+        .min(network::MAX_MONEY_SATS as i64);
+    let unconfirmed = r
+        .unconfirmed
+        .saturating_add(c.unconfirmed)
+        .min(network::MAX_MONEY_SATS as i64);
     Ok(WalletState {
-        confirmed: r
-            .confirmed
-            .saturating_add(c.confirmed)
-            .min(network::MAX_MONEY_SATS as i64),
-        unconfirmed: r
-            .unconfirmed
-            .saturating_add(c.unconfirmed)
-            .min(network::MAX_MONEY_SATS as i64),
+        confirmed,
+        // Pending spends can make this negative, but never below zero total.
+        unconfirmed: unconfirmed.max(-confirmed),
         used,
         next_receive: r.next,
         next_change: c.next,
@@ -1039,6 +1058,20 @@ mod tests {
             Net::Mainnet,
             "https://mempool.space/api\n"
         ));
+
+        // IPv6 authorities are rejected outright: a naive split on ':' would
+        // make different IPv6 hosts compare equal and bypass the redirect guard.
+        assert!(!looks_like_url_for(
+            Net::Mainnet,
+            "https://[2001:db8::1]/api"
+        ));
+        assert!(!looks_like_url_for(Net::Mainnet, "https://[::1]/api"));
+        assert!(!looks_like_url_for(Net::Mainnet, "https://2001:db8::1/api"));
+        assert_eq!(
+            url_parts("https://mempool.space:443/api").unwrap().0,
+            "mempool.space"
+        );
+        assert!(resolve_redirect("https://[2001:db8::1]/api", "/x").is_err());
 
         // A testnet name anywhere in the host or path disqualifies mainnet.
         assert!(!looks_like_url_for(
