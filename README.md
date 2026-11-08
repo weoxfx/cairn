@@ -56,15 +56,27 @@ audit.
 
 ### One-line install
 
-On Linux x86_64 or macOS:
+No GitHub release has been published yet, so the current one-line install uses a source build. It
+requires Rust and the platform build tools; if a release is published later, the same command uses
+a prebuilt binary on supported platforms.
+
+Linux x86_64, macOS, or Termux/Android:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/weoxfx/cairn/master/install.sh | sh
 ```
 
-The installer downloads the latest release, verifies its SHA-256 checksum, and puts `cairn` in
-`~/.local/bin` (override with `CAIRN_INSTALL_DIR`). It does not use `sudo`. Download and inspect
-`install.sh` first if you prefer.
+On Termux, install Rust first:
+
+```sh
+pkg install rust
+curl -fsSL https://raw.githubusercontent.com/weoxfx/cairn/master/install.sh | sh -s -- --from-source
+```
+
+The installer downloads a release when one exists, verifies its SHA-256 checksum, and puts `cairn`
+in `~/.local/bin` (Termux: `$PREFIX/bin`; override with `CAIRN_INSTALL_DIR`). Without a release it
+builds from source with `cargo`; if Cargo is missing it prints the exact command for your platform.
+It does not use `sudo`. Download and inspect `install.sh` first if you prefer.
 
 After it finishes, run:
 
@@ -89,8 +101,8 @@ repository. The installer is the no-root equivalent.
 
 ### Download a prebuilt binary
 
-No Rust toolchain is needed. Download the archive for your platform from the
-[latest release](https://github.com/weoxfx/cairn/releases/latest):
+Once a release is published, no Rust toolchain is needed. Download the archive for your platform
+from the [latest release](https://github.com/weoxfx/cairn/releases/latest):
 
 | Platform | Archive |
 |---|---|
@@ -116,7 +128,8 @@ binary on your `PATH` with:
 install -m 755 cairn ~/.local/bin/cairn
 ```
 
-Prebuilt Android/Termux and ARM Linux binaries are not published yet; use the source build below.
+Prebuilt Android/Termux and ARM Linux binaries are not published yet; the installer falls back to
+the source build, or use the source build below.
 
 ### Build from source
 

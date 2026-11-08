@@ -109,7 +109,7 @@ missing_build_tools() {
         printf '  pkg install rust\n' >&2
         printf '  curl -fsSL https://raw.githubusercontent.com/%s/master/install.sh | sh -s -- --from-source\n' "$repo" >&2
     else
-        printf 'Cairn has no prebuilt binary for %s/%s, and no published release was found.\n' "$os" "$arch" >&2
+        printf 'Cairn has no prebuilt binary for %s/%s, and no published release is available.\n' "$os" "$arch" >&2
         printf 'Install Rust and the platform build tools, then run this again:\n' >&2
         printf '  https://rustup.rs\n' >&2
         printf '  curl -fsSL https://raw.githubusercontent.com/%s/master/install.sh | sh -s -- --from-source\n' "$repo" >&2
@@ -120,10 +120,10 @@ missing_build_tools() {
 source_build() {
     need cargo
 
-    archive="cairn-${source_ref}.tar.gz"
+    archive="cairn-source.tar.gz"
     src_root="$tmp/src"
     mkdir -p "$src_root"
-    printf 'No release is available for this platform; building from source (%s)\n' "$source_ref"
+    printf 'No prebuilt binary is available; building from source (%s)\n' "$source_ref"
     curl -fsSL --proto '=https' --tlsv1.2 \
         "https://github.com/$repo/archive/$source_ref.tar.gz" \
         -o "$tmp/$archive"
