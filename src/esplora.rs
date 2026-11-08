@@ -94,21 +94,16 @@ pub fn net() -> Net {
     *NET.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Networks the settings screen may offer. Mainnet only appears after opt-in.
+/// Testnet variants the settings screen may offer. Mainnet is bound to the
+/// wallet at creation/import and always uses the mainnet API.
 pub fn selectable_nets() -> Vec<Net> {
-    let mut out = Net::TESTNETS.to_vec();
-    if network::enabled() {
-        out.insert(0, Net::Mainnet);
-    }
-    out
+    Net::TESTNETS.to_vec()
 }
 
 /// Pick the API server that matches the wallet's chain. This is the single place
-/// that prevents a testnet wallet from talking to a mainnet server, and it keeps
-/// mainnet wallets behind the explicit opt-in gate.
+/// that prevents a testnet wallet from talking to a mainnet server.
 pub fn net_for(wallet: Network) -> Result<Net, String> {
     if wallet == Network::Bitcoin {
-        network::require_enabled()?;
         return Ok(Net::Mainnet);
     }
     let configured = net();
@@ -152,9 +147,6 @@ pub fn load_config() {
                     .iter()
                     .find(|n| n.label().eq_ignore_ascii_case(s.trim()))
                 {
-                    if n.is_mainnet() && !network::enabled() {
-                        return;
-                    }
                     *NET.lock().unwrap_or_else(|e| e.into_inner()) = *n;
                 }
             }
@@ -163,9 +155,6 @@ pub fn load_config() {
 }
 
 pub fn set_net(n: Net) -> Result<(), String> {
-    if n.is_mainnet() {
-        network::require_enabled()?;
-    }
     let p = config_path().ok_or("HOME not set")?;
     if let Some(dir) = p.parent() {
         hardening::ensure_private_dir(dir)?;
@@ -1008,6 +997,12 @@ mod tests {
 
         tx["txid"] = json!(Txid::from_byte_array([8u8; 32]).to_string());
         assert!(check_prevout(&tx, &u).is_err());
+    }
+
+    #[test]
+    fn mainnet_is_wallet_bound_not_a_global_setting() {
+        assert_eq!(net_for(Network::Bitcoin).unwrap(), Net::Mainnet);
+        assert!(!selectable_nets().contains(&Net::Mainnet));
     }
 
     #[test]

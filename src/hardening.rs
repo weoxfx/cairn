@@ -1,6 +1,6 @@
 //! Process hardening: no core dumps, no ptrace/memory reads by other processes
 //! of the same user, private default file permissions, plus symlink-safe
-//! helpers for writing the wallet directory, config and mainnet marker.
+//! helpers for writing the wallet directory and config.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;

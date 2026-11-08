@@ -1,19 +1,15 @@
 # Security policy
 
-**Status: experimental, unaudited. Testnet is the default. Mainnet is opt-in only and is not
+**Status: experimental, unaudited. Testnet is the default. Mainnet is available but is not
 recommended for real funds until an independent audit is complete.**
 
-## Mainnet gate
+## Mainnet selection
 
-Mainnet is disabled by default. It becomes reachable only after either:
-
-- `cairn --enable-mainnet` and a typed `ENABLE MAINNET` confirmation, which writes
-  `~/.cairn/mainnet-enabled` (mode 600), or
-- `CAIRN_ENABLE_MAINNET=I_UNDERSTAND_UNAUDITED_MAINNET` for one session.
-
-Opening or creating a mainnet wallet then repeats the warning and asks for a typed `MAINNET`
-confirmation. The marker is a guard against accidents, not evidence of safety. It does not replace
-the independent audit that is still required before anyone should rely on Cairn for real money.
+Mainnet is not the default. It is chosen when creating or importing a wallet, without a marker file
+or environment variable. That choice shows a short experimental/unaudited notice and asks for a
+default-no confirmation. Opening an existing wallet uses its recorded network without another
+prompt. This is an accident guard, not evidence of safety. It does not replace the independent audit
+that is still required before anyone should rely on Cairn for real money.
 
 ## Review status
 
@@ -105,9 +101,6 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
 - Address scanning stops at the configured gap and the 200-address ceiling. Activity beyond that
   window may not appear until a wider scan is implemented.
 - Weak passwords, screen capture and shoulder surfing.
-- The mainnet opt-in marker can be deleted or forged by anyone who can write to your home directory.
-  It is ignored if it is a symlink, not a regular file, owned by another user, or group/world-
-  writable, but it is an accident guard, not an authorization boundary.
 - No independent audit has been done. Mainnet support existing in the code is not an audit result and
   must not be read as one.
 
@@ -117,7 +110,8 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
 - Keep dependencies minimal, pinned (commit `Cargo.lock`) and checked with `cargo audit`.
 - Never log, print or store secrets. Never add telemetry.
 - Anything touching keys, signing or the keystore needs tests and a careful review.
-- Never present mainnet as audited or recommended. Keep it opt-in and keep the warnings.
+- Never present mainnet as audited or recommended. Keep testnet the default and keep the
+  unaudited notice and confirmation.
 
 ## Before any release
 

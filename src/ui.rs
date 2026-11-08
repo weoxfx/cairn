@@ -33,14 +33,12 @@ pub fn banner() {
     if display_network() == Network::Bitcoin {
         println!(
             "{}  {}",
-            style("◆ CAIRN").red().bold(),
-            style(" MAINNET ").white().on_red().bold()
+            style("◆ CAIRN").yellow().bold(),
+            style(" MAINNET ").black().on_yellow().bold()
         );
         println!(
             "{}\n",
-            style("experimental · unaudited · REAL FUNDS AT RISK")
-                .red()
-                .bold()
+            style("mainnet · real bitcoin · experimental").yellow()
         );
     } else {
         println!(
@@ -50,7 +48,7 @@ pub fn banner() {
         );
         println!(
             "{}\n",
-            style("experimental · unaudited · no real funds").dim()
+            style("experimental · testnet · no real funds").dim()
         );
     }
 }

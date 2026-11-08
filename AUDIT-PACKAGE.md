@@ -3,23 +3,25 @@
 **Status: not audited.** This document prepares an independent review; it is not one. Nothing here
 should be read as a safety claim.
 
-Cairn is an experimental Bitcoin wallet. Testnet is the default and mainnet is opt-in. The project's
-goal is to run on mainnet eventually, but only after the exit criteria at the bottom are met.
+Cairn is an experimental Bitcoin wallet. Testnet is the default; mainnet is chosen when creating or
+importing a wallet. The project's goal is to run on mainnet eventually, but only after the exit
+criteria at the bottom are met.
 
 ## Target
 
 - Repository: Cairn (Rust, single binary).
-- Code commit: `1e87e5de388b03df97672065026008af339e8d6b` ("audit update"), tree
-  `f64d5ab283bc75334aed800d9b3f9c3dc3466650`, branch `master`.
-- Baseline tag: `audit-2026-11-08` currently points at the previous package commit `704bee7`;
-  move/recreate it on the final commit that contains this package and the latest fixes before the
-  engagement. **Pin the tag, commit and tree hash in the engagement letter.**
+- Code commit: `41dd624ee1dbf8073a5bd2716608bf15b4c414a7` ("update"), tree
+  `4a89ef9c6dccdabbd934c83118926027ebc84a5c`, branch `master`. The working tree also contains
+  uncommitted mainnet-selection UX changes; commit and re-pin before an engagement.
+- Baseline tag: none. The old `audit-2026-11-08` tag pointed at the stale package commit
+  `704bee7` and was removed. Do not create an "audit" tag until an independent review is engaged;
+  pin this commit and tree hash in the engagement letter and tag the final package commit then.
 - Second-pass fixes A-01..A-03, the fuzz harness, the third-pass hardening (fee ceiling, prevout
   checks, best-effort `mlock`, PSBT fuzz target) and the prior external AI-assisted review fixes
   (IPv6 redirect rejection, duplicate outpoints, non-zero locktime and negative mempool deltas) are
-  committed in that code tree. The latest review fixes (chain-specific URLs, authority-preserving
-  redirects, transaction-screen network, seed re-entry, body-size failure, drop ordering) are in the
-  working tree after it and must be committed before the next review.
+  committed in the code tree. The latest review fixes (chain-specific URLs, authority-preserving
+  redirects, transaction-screen network, seed re-entry, body-size failure, drop ordering) are
+  committed in `41dd624`.
 - Version: `0.2.0`. Toolchain used for review: `rustc 1.98.1`, `cargo 1.98.1`. `Cargo.lock` is
   committed and all checks run with `--locked`.
 - Platform reviewed: Linux. The code is Unix-only and claims macOS and Termux compatibility.
@@ -36,7 +38,7 @@ In scope:
 | PSBT and offline flow | `src/offline.rs`, `src/psbt_guard.rs` | PSBT creation, verification, signing, change classification, unsigned/signed comparison, file handling, broadcast; wallet-independent structure and amount checks. |
 | QR transport | `src/qr.rs` | Frame parser bounds, checksum, reassembly, image parsing and decompression limits. |
 | Network and API | `src/esplora.rs` | URL chain guard, manual redirects, same-host enforcement, TLS-only client, JSON parsing bounds, UTXO/balance/history validation, prevout cross-check, failover. |
-| Mainnet gate | `src/network.rs` | Marker/env opt-in, ownership and permission checks, typed confirmations, fail-closed composition. |
+| Mainnet selection | `src/network.rs`, `src/main.rs`, `src/esplora.rs` | Testnet default, availability, default-no confirmation, chain-aware `net_for`, fail-closed composition. |
 | Local hardening | `src/hardening.rs` | rlimits, umask, private directories, atomic/symlink-safe writes. |
 | UI and CLI | `src/main.rs`, `src/ui.rs` | Password entry, seed display, secret screen, confirmations, argument parsing, idle lock. |
 
@@ -94,8 +96,9 @@ cargo +nightly fuzz run psbt -- -max_total_time=300
 
 There are no network-dependent tests in the suite. The manual testnet flow uses a faucet and a
 throwaway wallet: create -> receive -> sync -> send -> offline PSBT sign -> broadcast -> confirm.
-The mainnet gate can be exercised with a temporary `HOME` and `--enable-mainnet` / `--disable-mainnet`;
-`CAIRN_ENABLE_MAINNET=I_UNDERSTAND_UNAUDITED_MAINNET` opens the gate for one process.
+Mainnet can be exercised by creating or importing a wallet and choosing Mainnet; it shows the short
+experimental/unaudited notice and asks for a default-no confirmation. Testnet remains the default,
+opening a wallet uses its recorded network, and no marker or environment setup is required.
 
 The `fuzz/` package covers the URL/redirect guard, the QR frame parser and PSBT deserialization plus
 `psbt_guard::check_structure` (shared with the offline verifier). Keystore JSON still needs a pure
@@ -104,7 +107,7 @@ adapter before it can be fuzzed; it is covered by unit tests for now.
 ## Questions for the audit
 
 1. Can a tampered wallet file relabel the network, weaken the KDF, or make the tool spend mainnet coins
-   without the opt-in? Is the v2 AAD unambiguous?
+   without confirmation? Is the v2 AAD unambiguous?
 2. Can any path derive or use a spending key without the expected fingerprint, network-specific BIP84
    path and script match?
 3. Does the offline verifier prove that every input belongs to the wallet and that the only non-change
@@ -115,8 +118,8 @@ adapter before it can be fuzzed; it is covered by unit tests for now.
    they affect display, selection or signing?
 6. Can a planted file, FIFO, symlink or directory in `$HOME` cause a write outside the intended path,
    a hang, or a permission downgrade?
-7. Is the mainnet gate composed safely across every entry point (wallet creation, import, open, send,
-   PSBT create/sign/broadcast, QR show/scan, settings, environment and marker)?
+7. Is mainnet selection and confirmation composed safely across every entry point (wallet creation,
+   import, open, send, PSBT create/sign/broadcast, QR show/scan and settings)?
 8. Are secrets zeroized and kept out of scrollback/core dumps to the extent the platform allows?
 
 ## Deliverables and exit criteria
@@ -134,5 +137,5 @@ plus a retest after fixes. Mainnet is not recommended for real funds until:
 6. The release is reproducible and signed, `cargo audit` is clean, and an incident/disclosure process
    exists.
 
-Until then: testnet remains the default, mainnet remains opt-in, and the UI must keep saying
+Until then: testnet remains the default, mainnet remains explicit, and the UI must keep saying
 "unaudited".

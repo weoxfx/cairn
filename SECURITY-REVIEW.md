@@ -16,7 +16,7 @@ Reviewed at commit state immediately before the review's fixes (working tree, ve
 - Online send flow, coin selection, fee calculation, address/amount parsing, signing.
 - Offline PSBT verify/sign/broadcast path and QR transport.
 - Esplora HTTP layer, provider failover, chain-aware URL guard, untrusted response handling.
-- Mainnet opt-in gate, UI network labels, process hardening, docs and CI configuration.
+- Mainnet selection and confirmation, UI network labels, process hardening, docs and CI configuration.
 
 Dependencies were scanned with `cargo audit`. The review relied on manual reading and the existing
 test suite; it did not include formal verification, fuzzing, side-channel analysis, live mainnet
@@ -58,7 +58,7 @@ or require an independent audit to assess properly.
 | S-08 | Low | Mainnet banner state after cancelling confirmation | Fixed |
 | S-09 | Low | KDF upper bound allows local 1 GiB work factor | Fixed (bounded) |
 | S-10 | Info | Cross-host / malformed-host HTTPS redirects | Fixed |
-| S-11 | Info | Mainnet marker is forgeable by same-user malware | Accepted |
+| S-11 | Info | Mainnet confirmation is an accident guard, not authorization | Accepted |
 | S-12 | Info | No `mlock`; terminal wiping is best effort | Mitigated (best effort) |
 | S-13 | Info | Testnet variants share coin type 1 and URL-based identification | Accepted |
 
@@ -140,8 +140,8 @@ clippy warnings, runs tests single-threaded and denies `cargo audit` warnings.
 
 ### S-08 — Mainnet banner after cancel (fixed)
 
-**Impact:** cancelling the typed mainnet confirmation could leave the terminal displaying the red
-mainnet banner while the session was still effectively testnet/default. Cosmetic and potentially
+**Impact:** cancelling the mainnet confirmation could leave the terminal displaying the mainnet
+banner while the session was still effectively testnet/default. Cosmetic and potentially
 confusing, not an authorisation bypass.
 
 **Fix:** reset the display network to testnet when confirmation is cancelled.
@@ -164,13 +164,13 @@ relative redirects, rejects userinfo and IPv6 literals, and compares the full au
 resolution and same-origin checks have unit tests. The remaining exposure is same-origin path changes
 by the provider, which cannot receive keys or change what a response means.
 
-### S-11 — Mainnet marker is an accident guard (accepted)
+### S-11 — Mainnet selection is an accident guard (accepted)
 
-`~/.cairn/mainnet-enabled` is a plain file, and the environment token is process-controlled. The
-marker is ignored if it is a symlink, not a regular file, owned by another user, or group/world-
-writable, and it is written atomically with mode 600. Malware running as the user can still create or
-set it. The gate exists to prevent accidental mainnet use, not
-to resist a compromised account. This is documented in `SECURITY.md`.
+Mainnet is chosen when creating or importing a wallet, while testnet remains the default. That
+choice shows a short notice that Cairn is experimental and unaudited, then asks for a default-no
+confirmation. Opening a wallet uses its recorded network without another prompt. The UI does not
+claim safety, and mainnet spends still go through the normal review screens. This prevents accidental
+chain selection, not a compromised account. This is documented in `SECURITY.md`.
 
 ### S-12 — Memory locking; terminal wiping is best effort (mitigated, best effort)
 
@@ -191,10 +191,9 @@ by coin type 0 and address prefix.
 
 Beyond the findings above, the same pass also:
 
-- Made `.cairn`, the wallet directory, the mainnet marker, the network config and PSBT output
-  symlink-safe: symlinked directories are refused, private files are replaced atomically
-  (`O_NOFOLLOW` temp file + rename) with mode 600, and the marker is ignored unless it is a regular
-  file owned by the user and not group/world-writable.
+- Made `.cairn`, the wallet directory, the network config and PSBT output symlink-safe: symlinked
+  directories are refused, private files are replaced atomically (`O_NOFOLLOW` temp file + rename)
+  with mode 600.
 - Extended server-text sanitisation to invisible Unicode format characters in addition to control
   characters.
 - Bounded per-address API balances to the 21 million BTC supply and represent negative mempool
@@ -222,8 +221,9 @@ Accepted, not changed:
 
 - A same-origin HTTPS redirect can still change the path. It remains on the provider's host and port,
   no keys are sent, and responses stay untrusted, so this is metadata exposure only.
-- `--qr-show` / `--qr-scan` display a mainnet label inferred from an untrusted PSBT before opt-in. They
-  never sign or use the network, and signing/broadcasting still pass the gate.
+- `--qr-show` / `--qr-scan` display a mainnet label inferred from an untrusted PSBT before the
+  interactive confirmation. They never sign or use the network, and signing/broadcasting still go
+  through the normal review screens.
 - Directory creation and chmod have the usual same-user TOCTOU window. Same-user malware is outside the
   threat model.
 
@@ -258,8 +258,8 @@ was an AI-assisted review, not an independent audit. Triage:
   must be hostnames or IPv4 literals. Regression assertions cover `[2001:db8::1]`, `[::1]` and an
   unbracketed literal.
 - **BLOCK-02 (Medium, no code change) — missing tag/history.** The reviewer's snapshot had one commit
-  and no tags; this repository has `826007a` and `audit-2026-11-08` (the audit-package commit).
-  Re-running the review at the tag resolves it.
+  and no tags; the full history is now on `master`. The old `audit-2026-11-08` tag was removed
+  because it pointed at a stale package commit, so use a pinned commit hash for any re-review.
 - **INF-01 (Info, accepted).** The 10,000-sat floor intentionally allows a normal minimum fee on
   dust-sized sends; a 10,000-sat fee on a 294-sat output is still shown with its sat/vB and a
   percentage warning, and the absolute 1,000,000-sat cap remains. Lowering the floor would reject
@@ -291,21 +291,22 @@ was an AI-assisted review, not an independent audit. Triage:
   ANSI spoofing requires write access to the user's wallet directory (same-user, out of scope).
 - **INF-12 (Info, clean).** The reviewer's RustSec cross-check found no affected locked dependency.
 
-The fixes are committed in `1e87e5d`. A second source-only AI-assisted review at that commit found
-no blocking issue and re-confirmed the fixes and accepted residuals. It also lacked a Rust toolchain
-and saw no tag or earlier commits in its snapshot. The history and tag exist here, but
-`audit-2026-11-08` still points at the previous package commit `704bee7`; move it to the final
-package commit before the next engagement.
+The fixes are committed in `1e87e5d`; later review fixes are committed in `41dd624`. A second
+source-only AI-assisted review at `1e87e5d` found no blocking issue and re-confirmed the fixes and
+accepted residuals. It also lacked a Rust toolchain and saw no tag or earlier commits in its snapshot.
+The full history is on `master`. The old `audit-2026-11-08` tag was removed because it pointed at the
+stale `704bee7` package commit; no tag currently represents an audit.
 
 ## Latest external AI-assisted review triage (2026-11-08)
 
 A further source-only AI review of `1e87e5d` found no Critical/High code issue and one process
 problem. It was not an independent audit, and its snapshot again lacked tags/history. Findings:
 
-- **AUD-01 (Medium, process, open) — reproducibility.** The package and tag did not identify the
-  tree the reviewer examined. `AUDIT-PACKAGE.md` now records the code commit, and the final fixes
-  must be committed and the tag recreated on that commit before an engagement. This is not a code
-  vulnerability, but it blocks a reproducible audit.
+- **AUD-01 (Medium, process, partially addressed) — reproducibility.** The review snapshot did not
+  identify the tree it examined, and the old package tag was stale. `AUDIT-PACKAGE.md` now pins
+  `41dd624` / tree `4a89ef9c6dccdabbd934c83118926027ebc84a5c` and includes the latest fixes. The
+  stale tag was removed. A new tag should only be created for the independent-audit package; this
+  is not a code vulnerability, but an independent audit is still required.
 - **AUD-02 (Low, fixed) — testnet chain confusion.** The guard accepted any testnet name for any
   testnet, so a Testnet4 wallet could follow a same-host redirect to `testnet`/`signet`. Each testnet
   now requires its own segment (`testnet4`; `testnet`/`testnet3`; `signet`), and chain names in the
@@ -330,8 +331,8 @@ problem. It was not an independent audit, and its snapshot again lacked tags/his
   wallet with activity beyond that window needs a wider scan; this must be addressed before mainnet.
 - **AUD-11 (Info, fixed).** `Opened::drop` now zeroizes the mnemonic before releasing its `mlock`.
 
-The latest fixes are in the working tree after `1e87e5d`; commit them and re-pin before the next
-review.
+The latest fixes are committed in `41dd624`; no audit tag is published. Pin that commit and tree
+hash for the next review, and create a new tag only when the independent audit is engaged.
 
 ## Fuzzing harness (2026-11-08)
 
@@ -367,8 +368,9 @@ pure adapter before it can be fuzzed through the library.
   signature.
 - Offline `--broadcast` compares the signed PSBT's unsigned transaction and input metadata with the
   original unsigned file, and the offline review classifies change against the wallet's scripts.
-- The mainnet gate fails closed: marker/env opt-in, typed confirmation, chain-aware `net_for`, and a
-  URL guard that rejects cross-chain endpoints.
+- Mainnet is explicit: testnet is the default, selection uses a default-no confirmation,
+  chain-aware `net_for` binds wallets to the matching API, and the URL guard rejects cross-chain
+  endpoints.
 - `cargo audit` is clean and the dependency set is small.
 
 ## Residual risk and release recommendation
@@ -386,5 +388,5 @@ safe, the project still needs at least:
 5. A review of `mlock` failure behavior (locking is best effort) and further local-file DoS limits;
    cross-host redirects, the fee ceiling, prevout checks and the KDF upper bound are now addressed.
 
-Until then: keep testnet as the default, keep mainnet opt-in and clearly labelled unaudited, and do
-not use Cairn for meaningful real funds.
+Until then: keep testnet as the default, keep mainnet explicit and clearly labelled unaudited, and
+do not use Cairn for meaningful real funds.

@@ -401,7 +401,6 @@ fn show_psbt_review(v: &Verified, network: Network) {
 pub fn broadcast(unsigned_path: String, signed_path: String) -> Result<(), String> {
     let unsigned = read_psbt(&unsigned_path)?;
     let network = psbt_network(&unsigned)?;
-    network::require_supported(network)?;
     crate::ui::set_network(network);
     banner();
     println!("{}\n", style("Broadcast signed PSBT (online)").bold());

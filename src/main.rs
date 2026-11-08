@@ -12,9 +12,8 @@ mod wallet;
 use bip39::Mnemonic;
 use bitcoin::Network;
 use console::style;
-use dialoguer::{Input, Password};
+use dialoguer::{Confirm, Input, Password};
 use qrcode::{render::unicode, QrCode};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use ui::{banner, boxed, clear, fail, fmt_btc, menu, ok, pause, short, spin, theme};
 use wallet::Watch;
@@ -22,13 +21,9 @@ use zeroize::Zeroizing;
 
 const MIN_PASSWORD_LEN: usize = 12;
 const IDLE_LOCK: Duration = Duration::from_secs(300);
-const MAINNET_WARNING: &str = "\
-MAINNET IS UNAUDITED.\n\
-This software has not had an independent security audit. A bug can lose real money.\n\
-Use a hardware wallet or a reviewed wallet for anything you cannot afford to lose.\n\
-Testnet remains the default; mainnet is opt-in only.";
-
-static MAINNET_CONFIRMED_THIS_SESSION: AtomicBool = AtomicBool::new(false);
+const MAINNET_NOTICE: &str = "\
+Cairn is experimental and has not had an independent security audit.
+Mainnet uses real bitcoin; testnet is recommended for trying it out.";
 
 fn main() {
     hardening::init();
@@ -55,8 +50,6 @@ fn run() -> Result<(), String> {
             help();
             Ok(())
         }
-        "--enable-mainnet" => enable_mainnet_cmd(),
-        "--disable-mainnet" => disable_mainnet_cmd(),
         "--create-psbt" => {
             let (pos, out) = parse_args(&args[1..])?;
             if pos.len() > 1 {
@@ -129,75 +122,25 @@ Usage:
   cairn --qr-show <FILE.psbt>                Show a PSBT as QR frame(s)
   cairn --qr-scan [--out FILE.psbt] <IMAGE>...
                                              Rebuild a PSBT from QR photos
-  cairn --enable-mainnet                     Opt in to unaudited mainnet use
-  cairn --disable-mainnet                    Remove the mainnet opt-in marker
   cairn --help                               Show this help"
     );
 }
 
-fn enable_mainnet_cmd() -> Result<(), String> {
+/// Ask when a mainnet wallet is created or imported. Existing wallets use
+/// their recorded network without another prompt.
+pub(crate) fn confirm_mainnet() -> Result<(), String> {
     ui::set_network(Network::Bitcoin);
     banner();
-    println!("{}\n", style("Enable mainnet?").red().bold());
-    println!("{}\n", style(MAINNET_WARNING).red());
-    let answer: String = Input::with_theme(&theme())
-        .with_prompt("Type ENABLE MAINNET to opt in (anything else cancels)")
-        .allow_empty(true)
-        .interact_text()
+    println!("{}\n", style(MAINNET_NOTICE).yellow());
+    let proceed = Confirm::with_theme(&theme())
+        .with_prompt("Use Mainnet with real bitcoin?")
+        .default(false)
+        .interact()
         .map_err(|e| e.to_string())?;
-    if answer.trim() != "ENABLE MAINNET" {
-        ui::set_network(Network::Testnet);
-        println!("\nCancelled. Mainnet remains disabled.");
-        return Ok(());
-    }
-    let path = network::enable()?;
-    banner();
-    ok("Mainnet opt-in saved");
-    println!("  Marker: {}", path.display());
-    println!(
-        "{}\n",
-        style("  Every mainnet session still asks you to confirm. This is not an audit.").yellow()
-    );
-    pause();
-    Ok(())
-}
-
-fn disable_mainnet_cmd() -> Result<(), String> {
-    let removed = network::disable()?;
-    ui::set_network(Network::Testnet);
-    banner();
-    if removed {
-        ok("Mainnet opt-in removed. New sessions default to testnet.");
-    } else {
-        ok("Mainnet was already disabled.");
-    }
-    println!(
-        "{}\n",
-        style("  Existing mainnet wallet files are untouched and can still be opened after re-enabling.")
-            .dim()
-    );
-    pause();
-    Ok(())
-}
-
-/// Ask once per process before doing anything with a mainnet wallet.
-pub(crate) fn confirm_mainnet_session() -> Result<(), String> {
-    if MAINNET_CONFIRMED_THIS_SESSION.load(Ordering::SeqCst) {
-        return Ok(());
-    }
-    ui::set_network(Network::Bitcoin);
-    banner();
-    println!("{}\n", style(MAINNET_WARNING).red().bold());
-    let answer: String = Input::with_theme(&theme())
-        .with_prompt("Type MAINNET to continue (anything else cancels)")
-        .allow_empty(true)
-        .interact_text()
-        .map_err(|e| e.to_string())?;
-    if answer.trim() != "MAINNET" {
+    if !proceed {
         ui::set_network(Network::Testnet);
         return Err("Mainnet session cancelled.".into());
     }
-    MAINNET_CONFIRMED_THIS_SESSION.store(true, Ordering::SeqCst);
     Ok(())
 }
 
@@ -285,18 +228,15 @@ fn ask_new_password() -> Result<Zeroizing<String>, String> {
 
 // ---------- create / import / open ----------
 
-/// Testnet is the default. Mainnet only appears after the opt-in marker exists,
-/// and choosing it still requires the typed session confirmation.
+/// Testnet is the recommended default. Mainnet is always available and still
+/// gets a one-time confirmation.
 fn ask_network() -> Result<Network, String> {
-    if !network::enabled() {
-        return Ok(Network::Testnet);
-    }
     let i = menu(&[
-        "Testnet (recommended, no real funds)",
-        "Mainnet (UNAUDITED, real funds)",
+        "Testnet (recommended; no real funds)",
+        "Mainnet (real bitcoin; experimental)",
     ])?;
     if i == 1 {
-        confirm_mainnet_session()?;
+        confirm_mainnet()?;
         Ok(Network::Bitcoin)
     } else {
         Ok(Network::Testnet)
@@ -461,10 +401,6 @@ pub(crate) fn unlock_wallet_with(
                     .unwrap_or(false)
                 {
                     return Err("Wallet fingerprint changed. Nothing was signed.".into());
-                }
-                network::require_supported(opened.network)?;
-                if opened.network == Network::Bitcoin {
-                    confirm_mainnet_session()?;
                 }
                 unlocked = Some(opened);
                 break;
@@ -650,7 +586,7 @@ fn receive_screen(watch: &Watch, state: Option<&esplora::WalletState>) -> Result
         if network == Network::Bitcoin {
             println!(
                 "{}",
-                style("  REAL FUNDS. Verify this address on your device before sharing.").red()
+                style("  Mainnet address. Verify it on your device before sharing.").yellow()
             );
         } else {
             println!("  Send only TESTNET coins here (e.g. from a faucet).");
@@ -766,9 +702,7 @@ fn info_screen(fp: &str, watch: &Watch) -> Result<(), String> {
     if watch.network() == Network::Bitcoin {
         println!(
             "{}\n",
-            style("  MAINNET: unaudited software holding real funds.")
-                .red()
-                .bold()
+            style("  Mainnet: real bitcoin; experimental software.").yellow()
         );
     }
     pause();
@@ -799,9 +733,6 @@ fn settings() -> Result<(), String> {
         let i = menu(&refs)?;
         if i >= nets.len() {
             return Ok(());
-        }
-        if nets[i].is_mainnet() {
-            confirm_mainnet_session()?;
         }
         esplora::set_net(nets[i])?;
     }

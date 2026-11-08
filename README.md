@@ -4,8 +4,9 @@ An open-source Bitcoin wallet for the command line, built around an encrypted ke
 watch-only session and careful sending.
 
 > **EXPERIMENTAL. UNAUDITED. TESTNET BY DEFAULT.**
-> Mainnet is opt-in only, behind a typed confirmation and a persistent warning. Do not use real
-> funds you cannot afford to lose. Nobody independent has reviewed this code yet.
+> Mainnet is available from the network menu after a one-time confirmation. It is still
+> experimental and nobody independent has reviewed this code; do not use real funds you cannot
+> afford to lose.
 
 ## What it does today
 
@@ -17,26 +18,19 @@ watch-only session and careful sending.
 - Offline signing (file or QR transport): build an unsigned PSBT online, sign it on a
   machine with no network, then broadcast it after the online side verifies it
 - Works on Testnet4, Testnet3 and Signet, with provider failover and request pacing
-- Mainnet support is available only after an explicit, hard-to-trigger opt-in
+- Mainnet can be selected from the network menu; testnet remains the default
 - Runs on Linux, macOS and Android (Termux)
 
 ## Mainnet
 
-Cairn is built and tested testnet-first. Mainnet is **not audited** and must not be treated as
-safe for real savings. If you deliberately want to try it:
+Cairn is built and tested testnet-first, and testnet remains the default. Mainnet is chosen when
+creating or importing a wallet, without any extra setup. That choice shows a short
+experimental/unaudited notice and asks for confirmation. Opening an existing wallet uses its
+recorded network without another prompt.
 
-```
-cairn --enable-mainnet            # shows the warning, requires typing ENABLE MAINNET
-cairn                             # choose Mainnet; each session asks you to type MAINNET
-cairn --disable-mainnet           # remove the opt-in marker
-```
-
-For a single session without the marker:
-`CAIRN_ENABLE_MAINNET=I_UNDERSTAND_UNAUDITED_MAINNET cairn`.
-
-The opt-in marker is `~/.cairn/mainnet-enabled`. New wallets record their network, and every
-mainnet session repeats the warning. The API layer also refuses a testnet wallet pointed at a
-mainnet server (and the reverse). Use hardware or reviewed wallets for anything you cannot lose.
+Mainnet is **not audited** and must not be treated as safe for real savings. New wallets record
+their network, and the API layer refuses a testnet wallet pointed at a mainnet server (and the
+reverse). Use testnet, or a hardware/reviewed wallet, for anything you cannot afford to lose.
 
 ## Security design
 
@@ -48,7 +42,7 @@ mainnet server (and the reverse). Use hardware or reviewed wallets for anything 
 | Sending | Re-asks the password, checks the keys match the wallet and each coin, re-fetches each spent coin's creating transaction to compare value/address, checks that the amounts add up, enforces a fee ceiling (10% of the amount, 10k-sat floor, 1M-sat hard cap), uses deterministic (RFC6979) signatures |
 | Offline | `--offline` never opens a socket. It checks that every input belongs to the wallet, has the expected network-specific BIP84 path and script, that change is ours and that the fee clears the relay minimum. PSBT files must be regular files (no FIFOs or symlinks) and signed output is written atomically at mode 600. The online side refuses a signed PSBT that changed any input or output. QR frames are checksummed and then go through the same checks; they are public data, not encrypted |
 | Network | HTTPS-only with certificate checks; redirects are same-origin (host and port) and re-checked, broadcasts refuse them. Response size caps fail closed, with rate pacing, failover and a chain-specific URL guard; userinfo and IPv6 authorities are rejected. Server data is treated as untrusted; amounts and balances bounded, txids validated, control characters and invisible Unicode format characters stripped |
-| Mainnet gate | Disabled until an explicit marker or session token, a typed confirmation per session, and warnings on every mainnet screen. This is an accident guard, not an audit |
+| Mainnet | Available from the network menu; testnet remains the default. Selecting it shows a short experimental/unaudited notice and a default-no confirmation. This is an accident guard, not an audit |
 | Process | No core dumps, umask 077, 5-minute idle lock; non-dumpable on Linux/Android |
 
 Cryptographic primitives come from audited libraries (rust-bitcoin, libsecp256k1, RustCrypto).
@@ -117,8 +111,8 @@ The usual PSBT review still happens after scanning.
 
 ## Settings
 
-- **Network:** Settings in the main menu (Testnet4, Testnet3, Signet; Mainnet only appears after
-  the opt-in and still asks for confirmation)
+- **Network:** Settings in the main menu for Testnet4, Testnet3 and Signet. A wallet's mainnet or
+  testnet identity is fixed when it is created or imported.
 - **Your own server:** `export CAIRN_API=https://your-server/testnet/api` (comma separated for several; use a hostname or IPv4 literal, not an IPv6 literal)
 
 ## Development
@@ -141,7 +135,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 - [x] Send with review and confirmation
 - [x] Provider failover and rate pacing
 - [x] Offline signer with PSBT and QR transfer (PSBT files and QR images; live camera optional)
-- [x] Gated, unaudited mainnet support
+- [x] Experimental, unaudited mainnet support
 - [ ] Optional passphrase (25th word), 2-of-3 multisig
 - [ ] Own-node support (Electrum protocol), Tor
 - [x] Fuzzing harness for URL/redirect, QR frames and PSBT (keystore pending)
