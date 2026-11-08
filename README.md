@@ -3,11 +3,6 @@
 An open-source Bitcoin wallet for the command line, built around an encrypted keystore, a
 watch-only session and careful sending.
 
-> **EXPERIMENTAL. INDEPENDENT SOURCE REVIEW COMPLETED. NOT A THIRD-PARTY AUDIT. TESTNET BY DEFAULT.**
-> An independent AI-assisted source review of commit `b620147` found no Critical or High code
-> vulnerability under its documented threat model. It is not a professional third-party audit.
-> Mainnet remains experimental; do not use real funds you cannot afford to lose.
-
 ## What it does today
 
 - Create, import and open wallets (BIP39, 24 words, native SegWit / BIP84)
