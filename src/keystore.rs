@@ -101,9 +101,12 @@ fn aad_v2(
 
 /// A tampered wallet file must not be able to weaken the KDF or exhaust memory.
 fn validate_params(p: &KdfParams) -> Result<(), String> {
-    let ok = (19_456..=1_048_576).contains(&p.memory_kib)
-        && (2..=20).contains(&p.iterations)
-        && (1..=16).contains(&p.parallelism);
+    // Upper bounds are deliberately tight: a tampered file cannot make us burn
+    // gigabytes of memory or minutes of CPU before authentication fails. New
+    // wallets use 128 MiB / 3 passes, well inside the accepted window.
+    let ok = (19_456..=262_144).contains(&p.memory_kib)
+        && (2..=10).contains(&p.iterations)
+        && (1..=4).contains(&p.parallelism);
     if ok {
         Ok(())
     } else {
@@ -128,9 +131,10 @@ pub fn valid_name(name: &str) -> bool {
 
 pub fn wallet_dir() -> Result<PathBuf, String> {
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    let dir = PathBuf::from(home).join(".cairn").join("wallets");
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+    let base = PathBuf::from(home).join(".cairn");
+    crate::hardening::ensure_private_dir(&base)?;
+    let dir = base.join("wallets");
+    crate::hardening::ensure_private_dir(&dir)?;
     Ok(dir)
 }
 
@@ -316,7 +320,7 @@ pub fn open(name: &str, password: &str) -> Result<Opened, String> {
     let salt = hex::decode(&ks.salt).map_err(|_| bad())?;
     let nonce = hex::decode(&ks.nonce).map_err(|_| bad())?;
     let ct = hex::decode(&ks.ciphertext).map_err(|_| bad())?;
-    if nonce.len() != 12 || salt.len() < 16 {
+    if nonce.len() != 12 || !(16..=64).contains(&salt.len()) || ct.is_empty() || ct.len() > 64 {
         return Err(bad());
     }
 
@@ -551,6 +555,25 @@ mod tests {
             memory_kib: 262_144,
             iterations: 3,
             parallelism: 0
+        })
+        .is_err());
+        // The old 1 GiB / 20-pass ceiling is no longer accepted.
+        assert!(validate_params(&KdfParams {
+            memory_kib: 1_048_576,
+            iterations: 3,
+            parallelism: 1
+        })
+        .is_err());
+        assert!(validate_params(&KdfParams {
+            memory_kib: 262_144,
+            iterations: 11,
+            parallelism: 1
+        })
+        .is_err());
+        assert!(validate_params(&KdfParams {
+            memory_kib: 262_144,
+            iterations: 3,
+            parallelism: 8
         })
         .is_err());
     }

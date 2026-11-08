@@ -29,7 +29,7 @@ All of the following passed after the fixes in this document:
 ```
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --release -- --test-threads=1   # 37 passed
+cargo test --locked --release -- --test-threads=1   # 41 passed
 cargo audit                                        # 0 vulnerabilities, 155 dependencies
 cargo build --locked --release
 ```
@@ -56,8 +56,8 @@ or require an independent audit to assess properly.
 | S-06 | Low | Secret erasure gaps and long-lived per-input keys | Fixed |
 | S-07 | Low | CI workflow would not run on GitHub | Fixed |
 | S-08 | Low | Mainnet banner state after cancelling confirmation | Fixed |
-| S-09 | Low | KDF upper bound allows local 1 GiB work factor | Accepted |
-| S-10 | Info | Cross-host HTTPS redirects | Accepted |
+| S-09 | Low | KDF upper bound allows local 1 GiB work factor | Fixed (bounded) |
+| S-10 | Info | Cross-host HTTPS redirects | Fixed |
 | S-11 | Info | Mainnet marker is forgeable by same-user malware | Accepted |
 | S-12 | Info | No `mlock`; terminal wiping is best effort | Accepted |
 | S-13 | Info | Testnet variants share coin type 1 and URL-based identification | Accepted |
@@ -88,7 +88,8 @@ as clipboard access. No key material was exposed.
 
 **Fix:** transaction txids are parsed as `bitcoin::Txid` and invalid entries are skipped. Error bodies
 and unexpected broadcast responses are passed through `safe_text`, which strips control characters
-and bounds length. A regression test checks the sanitiser and `parse_utxo` validation.
+and invisible Unicode format characters (bidi overrides, zero-width, BOM) and bounds length. A
+regression test checks the sanitiser and `parse_utxo` validation.
 
 ### S-03 — Memory amplification from API responses (fixed)
 
@@ -105,8 +106,9 @@ responses fail closed with an error instead of being retained.
 **Impact:** PSBT files were read with `fs::read`, without a size cap, and opening a FIFO could block
 the process indefinitely. This is primarily a local denial-of-service / robustness issue.
 
-**Fix:** PSBTs are capped at 5 MB, opened with `O_NONBLOCK` and required to be regular files. Tests
-cover oversized files and directories.
+**Fix:** PSBTs are capped at 5 MB, opened with `O_NOFOLLOW | O_NONBLOCK` and required to be regular
+files. Signed output is written atomically with mode 600. Tests cover oversized files, directories
+and symlinks.
 
 ### S-05 — QR image decode allocation limits (fixed)
 
@@ -144,23 +146,28 @@ confusing, not an authorisation bypass.
 
 **Fix:** reset the display network to testnet when confirmation is cancelled.
 
-### S-09 — KDF upper bound allows local work-factor DoS (accepted)
+### S-09 — KDF upper bound allows local work-factor DoS (fixed, bounded)
 
-A locally modified wallet file can select KDF parameters up to 1 GiB / 20 passes / parallelism 16.
-Validation rejects weaker parameters and the AAD authenticates the parameters for v2, but the work is
-performed before authentication fails. An attacker who can already write the wallet file can simply
-delete or corrupt it, so this is accepted as a local availability risk.
+A locally modified wallet file could previously select KDF parameters up to 1 GiB / 20 passes /
+parallelism 16, and that work was performed before authentication failed. Accepted parameters are now
+capped at 256 MiB / 10 passes / 4 lanes (new wallets use 128 MiB / 3 / 1), and salt, nonce and
+ciphertext lengths are checked before any KDF work. A forged file can still force bounded work, but
+it can no longer request gigabytes of memory or minutes of CPU. An attacker who can already write the
+wallet file can also simply delete or corrupt it.
 
-### S-10 — Cross-host HTTPS redirects (accepted)
+### S-10 — Cross-host HTTPS redirects (fixed)
 
-The client refuses HTTP and HTTPS-to-HTTP redirects, but ordinary HTTPS redirects to another host are
-still followed. No secrets are sent and responses are untrusted, so the main effect is provider
-availability and metadata exposure. Disabling redirects entirely is a possible future hardening.
+Automatic redirects are now disabled in the HTTP agent and followed manually. A redirect must stay on
+the same host, remain HTTPS and still pass the chain-aware URL guard; anything else fails closed.
+`--broadcast` refuses redirects entirely. Redirect resolution has unit tests. The remaining exposure
+is same-host path changes by the provider, which cannot receive keys or change what a response means.
 
 ### S-11 — Mainnet marker is an accident guard (accepted)
 
-`~/.cairn/mainnet-enabled` is a plain file, and the environment token is process-controlled. Malware
-running as the user can create or set either. The gate exists to prevent accidental mainnet use, not
+`~/.cairn/mainnet-enabled` is a plain file, and the environment token is process-controlled. The
+marker is ignored if it is a symlink, not a regular file, owned by another user, or group/world-
+writable, and it is written atomically with mode 600. Malware running as the user can still create or
+set it. The gate exists to prevent accidental mainnet use, not
 to resist a compromised account. This is documented in `SECURITY.md`.
 
 ### S-12 — No memory locking; terminal wiping is best effort (accepted)
@@ -175,6 +182,21 @@ Testnet4, Testnet3 and Signet share BIP84 coin type 1 and the same address prefi
 and URL guard select the chain; there is no cryptographic chain identifier in the address. A wrong
 testnet choice cannot lose real funds, but it can show the wrong testnet history. Mainnet is separated
 by coin type 0 and address prefix.
+
+## Additional hardening (2026-11-08)
+
+Beyond the findings above, the same pass also:
+
+- Made `.cairn`, the wallet directory, the mainnet marker, the network config and PSBT output
+  symlink-safe: symlinked directories are refused, private files are replaced atomically
+  (`O_NOFOLLOW` temp file + rename) with mode 600, and the marker is ignored unless it is a regular
+  file owned by the user and not group/world-writable.
+- Extended server-text sanitisation to invisible Unicode format characters in addition to control
+  characters.
+- Bounded per-address API balances to the 21 million BTC supply and rejected negative values, so a
+  lying server cannot display an impossible balance.
+- Capped a `--qr-scan` invocation at 1024 images.
+- Took the HTTP user agent from `CARGO_PKG_VERSION` instead of a hard-coded version that could drift.
 
 ## Positive observations
 
@@ -206,7 +228,8 @@ safe, the project still needs at least:
    dry-run plan that does not risk funds.
 4. Platform testing on Linux, macOS and Termux/Android, including terminal behaviour and process
    hardening differences.
-5. A decision on memory locking, cross-host redirects and stronger local-file DoS limits.
+5. A decision on memory locking (`mlock`) and further local-file DoS limits; cross-host redirects
+   and the KDF upper bound are now closed.
 
 Until then: keep testnet as the default, keep mainnet opt-in and clearly labelled unaudited, and do
 not use Cairn for meaningful real funds.

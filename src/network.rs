@@ -5,11 +5,11 @@
 //! `CAIRN_ENABLE_MAINNET=I_UNDERSTAND_UNAUDITED_MAINNET` for a single session.
 //! This is a guard against accidents, not a replacement for an audit.
 
+use crate::hardening;
 use bitcoin::Network;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::PathBuf;
+use std::fs;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 
 pub const MAINNET_ENV: &str = "CAIRN_ENABLE_MAINNET";
 pub const MAINNET_TOKEN: &str = "I_UNDERSTAND_UNAUDITED_MAINNET";
@@ -50,7 +50,18 @@ pub fn enabled() -> bool {
     {
         return true;
     }
-    marker_path().map(|p| p.is_file()).unwrap_or(false)
+    marker_path().map(|p| marker_ok(&p)).unwrap_or(false)
+}
+
+/// The marker only counts if it is a real file owned by us and not writable by
+/// anyone else. A symlink or a group/world-writable file is ignored.
+fn marker_ok(path: &Path) -> bool {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    meta.file_type().is_file()
+        && meta.uid() == unsafe { libc::geteuid() }
+        && meta.permissions().mode() & 0o022 == 0
 }
 
 pub fn require_enabled() -> Result<(), String> {
@@ -77,22 +88,13 @@ pub fn require_supported(network: Network) -> Result<(), String> {
 pub fn enable() -> Result<PathBuf, String> {
     let path = marker_path().ok_or("HOME not set")?;
     let dir = path.parent().ok_or("invalid mainnet marker path")?;
-    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&path)
-        .map_err(|e| e.to_string())?;
-    f.write_all(
+    hardening::ensure_private_dir(dir)?;
+    hardening::write_private(
+        &path,
         b"Mainnet was enabled by an explicit opt-in.\n\
           Cairn is unaudited. Real funds can be lost.\n\
           Disable with: cairn --disable-mainnet\n",
-    )
-    .map_err(|e| e.to_string())?;
-    f.sync_all().map_err(|e| e.to_string())?;
+    )?;
     Ok(path)
 }
 
@@ -108,7 +110,6 @@ pub fn disable() -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     fn temp_home(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -168,6 +169,26 @@ mod tests {
         assert_eq!(require_supported(Network::Bitcoin), Ok(()));
         std::env::remove_var(MAINNET_ENV);
         assert!(!enabled());
+
+        // A planted symlink is not an opt-in, and enabling replaces the link
+        // instead of writing through it.
+        let marker = dir.join(".cairn").join(MARKER);
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, b"do not touch").unwrap();
+        std::os::unix::fs::symlink(&victim, &marker).unwrap();
+        assert!(!enabled());
+        enable().unwrap();
+        assert!(enabled());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"do not touch");
+        assert!(!std::fs::symlink_metadata(&marker)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        // A marker anyone could edit must not count.
+        std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(!enabled());
+        std::fs::remove_file(&marker).unwrap();
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -21,6 +21,7 @@ const PREFIX: &str = "CAIRN1";
 const CHUNK_BYTES: usize = 200;
 const MIN_CHUNK_BYTES: usize = 12;
 const MAX_FRAMES: usize = 256;
+const MAX_IMAGES: usize = 1024;
 const CHECKSUM_BYTES: usize = 8;
 const FRAME_MILLIS: u64 = 1500;
 const CYCLES: usize = 6;
@@ -271,6 +272,12 @@ pub fn show(data: &[u8]) -> Result<usize, String> {
 
 /// Read every QR code found in the given image files.
 pub fn scan_images(paths: &[String]) -> Result<Vec<String>, String> {
+    if paths.is_empty() {
+        return Err("no image files given".into());
+    }
+    if paths.len() > MAX_IMAGES {
+        return Err(format!("too many image files (max {MAX_IMAGES})"));
+    }
     let mut payloads = Vec::new();
     for path in paths {
         let mut reader =
@@ -525,5 +532,12 @@ mod tests {
         let found = scan_images(&[path.to_string_lossy().into_owned()]).unwrap();
         assert_eq!(found, vec![frame]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_absurd_image_lists() {
+        assert!(scan_images(&[]).is_err());
+        let many: Vec<String> = (0..=MAX_IMAGES).map(|i| format!("frame-{i}.png")).collect();
+        assert!(scan_images(&many).unwrap_err().contains("too many"));
     }
 }

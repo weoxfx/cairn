@@ -43,11 +43,11 @@ mainnet server (and the reverse). Use hardware or reviewed wallets for anything 
 | Area | What Cairn does |
 |---|---|
 | Seed | 256 bits from the OS random source, shown once on the terminal's alternate screen (no scrollback), then a 3-word backup quiz |
-| Storage | Only the encrypted entropy is saved. Argon2id (128 MB, 3 passes) then ChaCha20-Poly1305. The v2 AAD authenticates network, fingerprint, KDF parameters, salt and nonce. Atomic writes, mode 600, symlinks refused, KDF parameters validated on load. v1 testnet wallets still open |
+| Storage | Only the encrypted entropy is saved. Argon2id (128 MB, 3 passes) then ChaCha20-Poly1305. The v2 AAD authenticates network, fingerprint, KDF parameters, salt and nonce. Atomic writes that never follow a symlink, mode 600, `.cairn` kept at 700, symlinked wallet dirs refused, KDF bounds enforced on load. v1 testnet wallets still open |
 | Memory | After unlock only the public account key (xpub) is kept. The seed is wiped. Spending keys exist only for the moment of signing |
 | Sending | Re-asks the password, checks the keys match the wallet and each coin, checks that the amounts add up, uses deterministic (RFC6979) signatures |
-| Offline | `--offline` never opens a socket. It checks that every input belongs to the wallet, has the expected network-specific BIP84 path and script, that change is ours and that the fee clears the relay minimum. The online side refuses a signed PSBT that changed any input or output. QR frames are checksummed and then go through the same checks; they are public data, not encrypted |
-| Network | HTTPS-only with certificate checks (no HTTP or HTTPS-to-HTTP redirects), response size caps, rate pacing, failover, chain-aware URL guard. Server data is treated as untrusted; amounts are bounded, txids validated and terminal control characters stripped |
+| Offline | `--offline` never opens a socket. It checks that every input belongs to the wallet, has the expected network-specific BIP84 path and script, that change is ours and that the fee clears the relay minimum. PSBT files must be regular files (no FIFOs or symlinks) and signed output is written atomically at mode 600. The online side refuses a signed PSBT that changed any input or output. QR frames are checksummed and then go through the same checks; they are public data, not encrypted |
+| Network | HTTPS-only with certificate checks; redirects are same-host only and re-checked, broadcasts refuse them. Response size caps, rate pacing, failover, chain-aware URL guard. Server data is treated as untrusted; amounts and balances bounded, txids validated, control characters and invisible Unicode format characters stripped |
 | Mainnet gate | Disabled until an explicit marker or session token, a typed confirmation per session, and warnings on every mainnet screen. This is an accident guard, not an audit |
 | Process | No core dumps, umask 077, 5-minute idle lock; non-dumpable on Linux/Android |
 

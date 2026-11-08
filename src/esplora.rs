@@ -5,12 +5,14 @@
 //! for sending we only take UTXO txid/vout/value, and signatures commit to those
 //! values (a lying server can make a transaction invalid, not steal coins).
 
+use crate::hardening;
 use crate::network;
 use crate::wallet::Watch;
 use bitcoin::{Network, Txid};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
 use std::str::FromStr;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -19,6 +21,7 @@ pub const FULL_GAP: u32 = 10; // full scan on open
 pub const QUICK_GAP: u32 = 3; // cheap scan on refresh
 pub const MAX_INDEX: u32 = 200;
 const MAX_BODY: u64 = 2_000_000; // cap on any response body
+const MAX_REDIRECTS: usize = 3; // a redirect may stay on the same host only
 const MAX_PARALLEL: usize = 4; // gentle on public APIs (avoids rate limits)
 const MAX_UTXOS_PER_ADDRESS: usize = 10_000; // reject absurd server responses
 const MAX_UTXOS_TOTAL: usize = 20_000;
@@ -124,13 +127,23 @@ fn config_path() -> Option<std::path::PathBuf> {
 
 pub fn load_config() {
     if let Some(p) = config_path() {
-        // The config is a single network name; a huge or special file is not
-        // a valid config and must not be read into memory.
-        let small = std::fs::metadata(&p)
+        // The config is a single network name. Refuse symlinks and special
+        // files, and read through one descriptor so the checks and the read
+        // cannot race with a swap.
+        let Ok(f) = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&p)
+        else {
+            return;
+        };
+        let small = f
+            .metadata()
             .map(|m| m.is_file() && m.len() <= 1024)
             .unwrap_or(false);
         if small {
-            if let Ok(s) = std::fs::read_to_string(p) {
+            let mut s = String::new();
+            if f.take(1025).read_to_string(&mut s).is_ok() {
                 let mut all = Net::TESTNETS.to_vec();
                 all.insert(0, Net::Mainnet);
                 if let Some(n) = all
@@ -151,12 +164,13 @@ pub fn set_net(n: Net) -> Result<(), String> {
     if n.is_mainnet() {
         network::require_enabled()?;
     }
-    *NET.lock().unwrap_or_else(|e| e.into_inner()) = n;
     let p = config_path().ok_or("HOME not set")?;
     if let Some(dir) = p.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        hardening::ensure_private_dir(dir)?;
     }
-    std::fs::write(p, n.label()).map_err(|e| e.to_string())
+    hardening::write_private(&p, n.label().as_bytes())?;
+    *NET.lock().unwrap_or_else(|e| e.into_inner()) = n;
+    Ok(())
 }
 
 /// CAIRN_API (comma separated) overrides the built-in list, e.g. your own server.
@@ -205,8 +219,13 @@ fn agent() -> &'static ureq::Agent {
             .timeout_connect(Duration::from_secs(10))
             .timeout_read(Duration::from_secs(30))
             .timeout(Duration::from_secs(45))
-            .user_agent("cairn/0.3 (open-source bitcoin wallet)")
-            .https_only(true) // refuse http and HTTPS->HTTP redirects
+            .user_agent(concat!(
+                "cairn/",
+                env!("CARGO_PKG_VERSION"),
+                " (open-source bitcoin wallet)"
+            ))
+            .https_only(true) // refuse http outright
+            .redirects(0) // redirects are followed manually below, same host only
             .max_idle_connections(0) // fresh connection each time: no stale pooled sockets
             .build()
     })
@@ -216,31 +235,107 @@ fn agent() -> &'static ureq::Agent {
 /// bound it before it can reach the screen.
 fn safe_text(s: &str, max_chars: usize) -> String {
     s.chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| !c.is_control() && !is_invisible(*c))
         .take(max_chars)
         .collect()
 }
 
+/// Bidi overrides, zero-width characters and other format controls can reorder
+/// or hide terminal text even though `is_control()` does not catch them.
+fn is_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+    )
+}
+
+fn read_body(resp: ureq::Response) -> Result<String, String> {
+    let mut body = String::new();
+    resp.into_reader()
+        .take(MAX_BODY)
+        .read_to_string(&mut body)
+        .map_err(|e| format!("read error: {e}"))?;
+    Ok(body)
+}
+
+fn status_error(code: u16, resp: ureq::Response) -> String {
+    let mut b = String::new();
+    let _ = resp.into_reader().take(2000).read_to_string(&mut b);
+    if code == 429 || code >= 500 {
+        format!("server busy or down (HTTP {code})")
+    } else {
+        // Definitive answer (e.g. a transaction rejected): don't retry elsewhere.
+        format!("REJECTED: {}", safe_text(b.trim(), 500))
+    }
+}
+
 fn read_resp(r: Result<ureq::Response, ureq::Error>) -> Result<String, String> {
     match r {
-        Ok(resp) => {
-            let mut body = String::new();
-            resp.into_reader()
-                .take(MAX_BODY)
-                .read_to_string(&mut body)
-                .map_err(|e| format!("read error: {e}"))?;
-            Ok(body)
+        Ok(resp) => read_body(resp),
+        Err(ureq::Error::Status(code, resp)) => Err(status_error(code, resp)),
+        Err(e) => Err(format!("network error: {e}")),
+    }
+}
+
+fn is_redirect(code: u16) -> bool {
+    matches!(code, 301 | 302 | 303 | 307 | 308)
+}
+
+fn redirect_target(resp: &ureq::Response) -> Result<String, String> {
+    let location = resp
+        .header("location")
+        .ok_or("redirect without a Location header")?;
+    resolve_redirect(resp.get_url(), location)
+}
+
+/// Resolve a Location header against the request URL. Only standard forms are
+/// accepted; anything ambiguous fails closed rather than being guessed at.
+fn resolve_redirect(base: &str, location: &str) -> Result<String, String> {
+    let location = location.trim();
+    let (host, path) = url_parts(base).ok_or("invalid API URL")?;
+    if location.is_empty() {
+        return Err("empty redirect target".into());
+    }
+    if location.starts_with("https://") {
+        return Ok(location.to_string());
+    }
+    if let Some(rest) = location.strip_prefix("//") {
+        return Ok(format!("https://{rest}"));
+    }
+    if location.starts_with('/') {
+        return Ok(format!("https://{host}{location}"));
+    }
+    if location.starts_with('?') {
+        let bare = path.split('?').next().unwrap_or(path);
+        return Ok(format!("https://{host}{bare}{location}"));
+    }
+    let dir = match path.rfind('/') {
+        Some(i) => &path[..=i],
+        None => "/",
+    };
+    Ok(format!("https://{host}{dir}{location}"))
+}
+
+enum GetStep {
+    Body(String),
+    Redirect(String),
+}
+
+fn one_get(url: &str) -> Result<GetStep, String> {
+    match agent().get(url).call() {
+        Ok(resp) if is_redirect(resp.status()) => Ok(GetStep::Redirect(redirect_target(&resp)?)),
+        Ok(resp) => Ok(GetStep::Body(read_body(resp)?)),
+        Err(ureq::Error::Status(code, resp)) if is_redirect(code) => {
+            Ok(GetStep::Redirect(redirect_target(&resp)?))
         }
-        Err(ureq::Error::Status(code, resp)) => {
-            let mut b = String::new();
-            let _ = resp.into_reader().take(2000).read_to_string(&mut b);
-            if code == 429 || code >= 500 {
-                Err(format!("server busy or down (HTTP {code})"))
-            } else {
-                // Definitive answer (e.g. a transaction rejected): don't retry elsewhere.
-                Err(format!("REJECTED: {}", safe_text(b.trim(), 500)))
-            }
-        }
+        Err(ureq::Error::Status(code, resp)) => Err(status_error(code, resp)),
         Err(e) => Err(format!("network error: {e}")),
     }
 }
@@ -262,19 +357,46 @@ fn pace() {
     }
 }
 
-fn http_get(url: &str) -> Result<String, String> {
+/// GET with manual redirect handling. A redirect may only stay on the same
+/// host and must still satisfy the chain guard, so a provider cannot hand our
+/// requests (and metadata) to an unrelated host.
+fn http_get(net: Net, url: &str) -> Result<String, String> {
     pace();
-    read_resp(agent().get(url).call())
+    let origin = host_of(url).ok_or("invalid API URL")?.to_ascii_lowercase();
+    let mut current = url.to_string();
+    for _ in 0..=MAX_REDIRECTS {
+        match one_get(&current)? {
+            GetStep::Body(body) => return Ok(body),
+            GetStep::Redirect(next) => {
+                let same_host = host_of(&next)
+                    .map(|h| h.eq_ignore_ascii_case(&origin))
+                    .unwrap_or(false);
+                if !same_host || !looks_like_url_for(net, &next) {
+                    return Err("refusing API redirect to another host or chain".into());
+                }
+                current = next;
+            }
+        }
+    }
+    Err("too many API redirects".into())
 }
 
 fn http_post(url: &str, body: &str) -> Result<String, String> {
     pace();
-    read_resp(
-        agent()
-            .post(url)
-            .set("Content-Type", "text/plain")
-            .send_string(body),
-    )
+    match agent()
+        .post(url)
+        .set("Content-Type", "text/plain")
+        .send_string(body)
+    {
+        // A signed transaction must go to the endpoint we chose, never to
+        // wherever a server points us.
+        Ok(resp) if is_redirect(resp.status()) => Err("refusing a redirect on broadcast".into()),
+        other => read_resp(other),
+    }
+}
+
+fn host_of(url: &str) -> Option<&str> {
+    url_parts(url).map(|(host, _)| host)
 }
 
 fn url_parts(p: &str) -> Option<(&str, &str)> {
@@ -363,7 +485,7 @@ fn try_providers(
 }
 
 fn get(net: Net, path: &str) -> Result<Value, String> {
-    let body = try_providers(net, path, &|u| http_get(u))?;
+    let body = try_providers(net, path, &|u| http_get(net, u))?;
     serde_json::from_str(&body).map_err(|e| format!("bad response: {e}"))
 }
 
@@ -402,16 +524,19 @@ pub struct AddrInfo {
 
 pub fn address_info(net: Net, addr: &str) -> Result<AddrInfo, String> {
     let v = get(net, &format!("/address/{addr}"))?;
-    let delta = |k: &str| {
-        v[k]["funded_txo_sum"]
-            .as_i64()
-            .unwrap_or(0)
-            .saturating_sub(v[k]["spent_txo_sum"].as_i64().unwrap_or(0))
+    let delta = |k: &str| -> Result<i64, String> {
+        let funded = v[k]["funded_txo_sum"].as_i64().unwrap_or(0);
+        let spent = v[k]["spent_txo_sum"].as_i64().unwrap_or(0);
+        let value = funded.saturating_sub(spent);
+        if !(0..=network::MAX_MONEY_SATS as i64).contains(&value) {
+            return Err("server returned an impossible balance".into());
+        }
+        Ok(value)
     };
     let count = |k: &str| v[k]["tx_count"].as_u64().unwrap_or(0);
     Ok(AddrInfo {
-        confirmed: delta("chain_stats"),
-        unconfirmed: delta("mempool_stats"),
+        confirmed: delta("chain_stats")?,
+        unconfirmed: delta("mempool_stats")?,
         tx_count: count("chain_stats").saturating_add(count("mempool_stats")),
     })
 }
@@ -797,5 +922,29 @@ mod tests {
         // Terminal control characters from a server must never reach the screen.
         assert_eq!(safe_text("ab\u{1b}[31mcd\n", 64), "ab[31mcd");
         assert_eq!(safe_text("abcdef", 3), "abc");
+        // Bidi overrides and zero-width characters must not spoof the display.
+        assert_eq!(safe_text("a\u{202E}b\u{200B}c\u{FEFF}", 64), "abc");
+    }
+
+    #[test]
+    fn redirects_resolve_without_leaving_https() {
+        assert_eq!(
+            resolve_redirect("https://mempool.space/api", "/testnet4/api").unwrap(),
+            "https://mempool.space/testnet4/api"
+        );
+        assert_eq!(
+            resolve_redirect(
+                "https://mempool.space/testnet4/api",
+                "https://mempool.space/testnet4/tx"
+            )
+            .unwrap(),
+            "https://mempool.space/testnet4/tx"
+        );
+        assert_eq!(
+            resolve_redirect("https://mempool.space/testnet4/api", "tx").unwrap(),
+            "https://mempool.space/testnet4/tx"
+        );
+        assert!(resolve_redirect("http://mempool.space/api", "/api").is_err());
+        assert!(resolve_redirect("https://mempool.space/api", "").is_err());
     }
 }

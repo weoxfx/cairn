@@ -36,8 +36,10 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
 - **Seed generation:** 256 bits from the OS random source, BIP39, shown once on the alternate
   screen and then cleared.
 - **Wallet file:** Argon2id (128 MB, 3 passes) then ChaCha20-Poly1305, mode 600 in a 700 folder,
-  atomic writes. Symlinks and oversized files are refused. KDF parameters are validated so a
-  tampered file cannot weaken the key derivation or exhaust memory. Version 2 authenticates the
+  atomic writes that never follow a symlink. Symlinks and oversized files are refused; `~/.cairn`
+  and its wallet directory must be real directories and are kept at mode 700. KDF parameters are
+  validated against tight bounds (19 MiB–256 MiB, 2–10 passes, 1–4 lanes) so a tampered file cannot
+  weaken the key derivation or exhaust memory. Version 2 authenticates the
   network, fingerprint, KDF parameters, salt and nonce in the AAD, so relabelling a mainnet wallet
   as testnet (or downgrading its KDF) fails decryption. Version 1 testnet wallets remain readable.
 - **Session:** after unlock only the public account key is kept. Temporary private keys
@@ -50,19 +52,22 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
   checks every input belongs to the loaded wallet with an `m/84'/coin'/0'/chain/index` key origin
   for the wallet's network and a matching P2WPKH script, classifies change against the wallet's
   addresses, rejects amounts above the money supply, enforces a minimum fee, and requires `SEND`.
-  PSBT files are capped at 5 MB and must be regular files (no FIFOs). The online `--broadcast` step
+  PSBT files are capped at 5 MB, must be regular files and are opened with `O_NOFOLLOW` (no FIFOs or
+  symlinks); signed output is written atomically with mode 600. The online `--broadcast` step
   rejects a signed PSBT whose unsigned transaction or input metadata differs from the unsigned file
   it was given.
 - **QR transport:** `--qr-show` splits a PSBT into versioned frames with a short SHA-256 checksum.
   `--qr-scan` reassembles them in any order, rejects missing, mixed or corrupt frames, caps image
   dimensions and decoding memory, and the resulting PSBT goes through the same offline verification
   before anything is signed.
-- **Network:** HTTPS-only certificate-verified requests (HTTP and HTTPS-to-HTTP redirects are
-  refused), response size limits, request pacing, provider failover, and a chain-aware URL guard:
+- **Network:** HTTPS-only certificate-verified requests. Redirects are followed manually and only
+  to the same host, with HTTPS and the chain guard re-checked; broadcasts refuse redirects
+  entirely. Response size limits, request pacing, provider failover, and a chain-aware URL guard:
   testnet wallets refuse mainnet endpoints, mainnet wallets refuse testnet/signet endpoints.
-  Responses are treated as untrusted: amounts are bounded, txids are validated and terminal control
-  characters are stripped before server text reaches the screen. This prevents the common
-  wrong-chain accident and response-driven display attacks, not a malicious server in general.
+  Responses are treated as untrusted: amounts and balances are bounded, txids are validated and
+  terminal control characters plus invisible Unicode format characters are stripped before server
+  text reaches the screen. This prevents the common wrong-chain accident and response-driven
+  display/redirect attacks, not a malicious server in general.
 - **Process:** core dumps disabled, umask 077. On Linux and Android the process is also marked
   non-dumpable; other platforms rely on the core-dump limit and OS protections.
 
@@ -80,14 +85,15 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
 - Short-lived copies of secrets that libraries do not wipe (for example the password prompt and some
   key types). Erasing is best-effort, and secrets are not `mlock`ed, so a swapped or hibernated
   machine can still expose them.
-- **API redirects:** the client refuses HTTP and HTTPS-to-HTTP redirects, but still follows ordinary
-  HTTPS redirects to another host. No key material is sent, and responses remain untrusted, but a
-  malicious provider can redirect availability and metadata requests.
+- **API redirects:** the client refuses cross-host, non-HTTPS and broadcast redirects. Same-host
+  HTTPS redirects are still followed, so a malicious provider can change paths and metadata
+  exposure within its own host. No key material is sent, and responses remain untrusted.
 - Privacy against the API server: it sees your IP and the addresses you query. Use your own server
   or Tor (planned).
 - Weak passwords, screen capture and shoulder surfing.
 - The mainnet opt-in marker can be deleted or forged by anyone who can write to your home directory.
-  It is an accident guard, not an authorization boundary.
+  It is ignored if it is a symlink, not a regular file, owned by another user, or group/world-
+  writable, but it is an accident guard, not an authorization boundary.
 - No independent audit has been done. Mainnet support existing in the code is not an audit result and
   must not be read as one.
 

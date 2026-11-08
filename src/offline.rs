@@ -635,7 +635,7 @@ fn confirm(prompt: &str, word: &str) -> Result<bool, String> {
 fn read_psbt(path: &str) -> Result<Psbt, String> {
     let file = fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NONBLOCK) // a planted FIFO must not hang us
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK) // no symlinks, no FIFO hangs
         .open(path)
         .map_err(|e| format!("cannot read {path}: {e}"))?;
     if !file
@@ -664,7 +664,7 @@ fn read_psbt(path: &str) -> Result<Psbt, String> {
 }
 
 fn write_psbt(path: &str, psbt: &Psbt) -> Result<(), String> {
-    fs::write(path, psbt.serialize()).map_err(|e| format!("cannot write {path}: {e}"))
+    crate::hardening::write_private(Path::new(path), &psbt.serialize())
 }
 
 fn signed_path(input: &str) -> String {
@@ -814,6 +814,10 @@ mod tests {
             .unwrap_err()
             .contains("too large"));
         assert!(read_psbt(dir.to_str().unwrap()).is_err());
+
+        let link = dir.join("link.psbt");
+        std::os::unix::fs::symlink(&bin, &link).unwrap();
+        assert!(read_psbt(link.to_str().unwrap()).is_err());
 
         let _ = fs::remove_dir_all(&dir);
     }
