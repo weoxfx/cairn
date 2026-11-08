@@ -4,7 +4,7 @@ An open-source Bitcoin wallet for the command line, built around an encrypted ke
 watch-only session and careful sending.
 
 > **EXPERIMENTAL. UNAUDITED. TESTNET BY DEFAULT.**
-> Mainnet is available from the network menu after a one-time confirmation. It is still
+> Mainnet is chosen when creating or importing a wallet, after a one-time confirmation. It is still
 > experimental and nobody independent has reviewed this code; do not use real funds you cannot
 > afford to lose.
 
@@ -42,7 +42,7 @@ reverse). Use testnet, or a hardware/reviewed wallet, for anything you cannot af
 | Sending | Re-asks the password, checks the keys match the wallet and each coin, re-fetches each spent coin's creating transaction to compare value/address, checks that the amounts add up, enforces a fee ceiling (10% of the amount, 10k-sat floor, 1M-sat hard cap), uses deterministic (RFC6979) signatures |
 | Offline | `--offline` never opens a socket. It checks that every input belongs to the wallet, has the expected network-specific BIP84 path and script, that change is ours and that the fee clears the relay minimum. PSBT files must be regular files (no FIFOs or symlinks) and signed output is written atomically at mode 600. The online side refuses a signed PSBT that changed any input or output. QR frames are checksummed and then go through the same checks; they are public data, not encrypted |
 | Network | HTTPS-only with certificate checks; redirects are same-origin (host and port) and re-checked, broadcasts refuse them. Response size caps fail closed, with rate pacing, failover and a chain-specific URL guard; userinfo and IPv6 authorities are rejected. Server data is treated as untrusted; amounts and balances bounded, txids validated, control characters and invisible Unicode format characters stripped |
-| Mainnet | Available from the network menu; testnet remains the default. Selecting it shows a short experimental/unaudited notice and a default-no confirmation. This is an accident guard, not an audit |
+| Mainnet | Chosen when creating or importing a wallet; testnet remains the default. The choice shows a short experimental/unaudited notice and a default-no confirmation. This is an accident guard, not an audit |
 | Process | No core dumps, umask 077, 5-minute idle lock; non-dumpable on Linux/Android |
 
 Cryptographic primitives come from audited libraries (rust-bitcoin, libsecp256k1, RustCrypto).
@@ -51,6 +51,72 @@ known limits and how to report a vulnerability. An internal review is documented
 [SECURITY-REVIEW.md](SECURITY-REVIEW.md); it is not a substitute for an independent audit.
 
 ## Install
+
+### One-line install
+
+On Linux x86_64 or macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/weoxfx/cairn/master/install.sh | sh
+```
+
+The installer downloads the latest release, verifies its SHA-256 checksum, and puts `cairn` in
+`~/.local/bin` (override with `CAIRN_INSTALL_DIR`). It does not use `sudo`. Download and inspect
+`install.sh` first if you prefer.
+
+After it finishes, run:
+
+```sh
+cairn
+```
+
+If your shell says `cairn: command not found`, add `~/.local/bin` to `PATH` once:
+
+```sh
+# Linux
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.profile
+. ~/.profile
+
+# macOS (zsh)
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+. ~/.zshrc
+```
+
+`apt install cairn` is not available because Cairn does not publish a signed Debian/Ubuntu APT
+repository. The installer is the no-root equivalent.
+
+### Download a prebuilt binary
+
+No Rust toolchain is needed. Download the archive for your platform from the
+[latest release](https://github.com/weoxfx/cairn/releases/latest):
+
+| Platform | Archive |
+|---|---|
+| Linux x86_64 | `cairn-v*-x86_64-unknown-linux-musl.tar.gz` |
+| macOS Apple Silicon | `cairn-v*-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `cairn-v*-x86_64-apple-darwin.tar.gz` |
+
+Each archive contains the `cairn` binary, `README.md`, `SECURITY.md` and both licenses. Download the
+matching `.sha256` file and verify it before running:
+
+```sh
+sha256sum -c cairn-v*-x86_64-unknown-linux-musl.tar.gz.sha256
+tar -xzf cairn-v*-x86_64-unknown-linux-musl.tar.gz
+cd cairn-v*-x86_64-unknown-linux-musl
+./cairn
+```
+
+On macOS use `shasum -a 256 -c ...` instead of `sha256sum -c`. The macOS binaries are unsigned; if
+Gatekeeper blocks one, use Finder's right-click **Open** or clear the quarantine attribute. Put the
+binary on your `PATH` with:
+
+```sh
+install -m 755 cairn ~/.local/bin/cairn
+```
+
+Prebuilt Android/Termux and ARM Linux binaries are not published yet; use the source build below.
+
+### Build from source
 
 You need Rust (https://rustup.rs). On Termux: `pkg install rust git`.
 
@@ -127,6 +193,18 @@ cargo audit
 Tests include the official BIP39 and BIP84 vectors, keystore tamper/network-relabel tests, signature
 verification, the offline PSBT verify/sign/roundtrip path and QR frame render/scan tests.
 See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Releasing
+
+Push a version tag to publish downloadable binaries:
+
+```sh
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+The release workflow builds a static Linux x86_64 binary and macOS binaries for Apple Silicon and
+Intel, attaches SHA-256 checksums and creates a GitHub Release.
 
 ## Roadmap
 
