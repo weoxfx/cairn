@@ -3,36 +3,58 @@
 An open-source Bitcoin wallet for the command line, built around an encrypted keystore, a
 watch-only session and careful sending.
 
-> **EXPERIMENTAL. TESTNET ONLY. UNAUDITED.**
-> Do not use real funds. Nobody independent has reviewed this code yet. Use at your own risk.
+> **EXPERIMENTAL. UNAUDITED. TESTNET BY DEFAULT.**
+> Mainnet is opt-in only, behind a typed confirmation and a persistent warning. Do not use real
+> funds you cannot afford to lose. Nobody independent has reviewed this code yet.
 
 ## What it does today
 
 - Create, import and open wallets (BIP39, 24 words, native SegWit / BIP84)
-- Encrypted wallet file (Argon2id + ChaCha20-Poly1305)
+- Encrypted wallet file (Argon2id + ChaCha20-Poly1305, authenticated metadata)
 - Balance, transaction list, receive addresses with QR codes
 - Send: address and amount validation, fee choice, full review screen,
   type `SEND` to confirm, password re-entry, then sign and broadcast
 - Offline signing (file or QR transport): build an unsigned PSBT online, sign it on a
   machine with no network, then broadcast it after the online side verifies it
 - Works on Testnet4, Testnet3 and Signet, with provider failover and request pacing
+- Mainnet support is available only after an explicit, hard-to-trigger opt-in
 - Runs on Linux, macOS and Android (Termux)
+
+## Mainnet
+
+Cairn is built and tested testnet-first. Mainnet is **not audited** and must not be treated as
+safe for real savings. If you deliberately want to try it:
+
+```
+cairn --enable-mainnet            # shows the warning, requires typing ENABLE MAINNET
+cairn                             # choose Mainnet; each session asks you to type MAINNET
+cairn --disable-mainnet           # remove the opt-in marker
+```
+
+For a single session without the marker:
+`CAIRN_ENABLE_MAINNET=I_UNDERSTAND_UNAUDITED_MAINNET cairn`.
+
+The opt-in marker is `~/.cairn/mainnet-enabled`. New wallets record their network, and every
+mainnet session repeats the warning. The API layer also refuses a testnet wallet pointed at a
+mainnet server (and the reverse). Use hardware or reviewed wallets for anything you cannot lose.
 
 ## Security design
 
 | Area | What Cairn does |
 |---|---|
 | Seed | 256 bits from the OS random source, shown once on the terminal's alternate screen (no scrollback), then a 3-word backup quiz |
-| Storage | Only the encrypted entropy is saved. Argon2id (128 MB, 3 passes) then ChaCha20-Poly1305. Atomic writes, mode 600, symlinks refused, KDF parameters validated on load |
+| Storage | Only the encrypted entropy is saved. Argon2id (128 MB, 3 passes) then ChaCha20-Poly1305. The v2 AAD authenticates network, fingerprint, KDF parameters, salt and nonce. Atomic writes, mode 600, symlinks refused, KDF parameters validated on load. v1 testnet wallets still open |
 | Memory | After unlock only the public account key (xpub) is kept. The seed is wiped. Spending keys exist only for the moment of signing |
 | Sending | Re-asks the password, checks the keys match the wallet and each coin, checks that the amounts add up, uses deterministic (RFC6979) signatures |
-| Offline | `--offline` never opens a socket. It checks that every input belongs to the wallet, has the expected BIP84 path and script, that change is ours and that the fee clears the relay minimum. The online side refuses a signed PSBT that changed any input or output. QR frames are checksummed and then go through the same checks; they are public data, not encrypted |
-| Network | HTTPS, response size caps, rate pacing, failover, testnet-only guard. Server data is treated as untrusted |
-| Process | No core dumps, not dumpable by other processes, umask 077, 5-minute idle lock |
+| Offline | `--offline` never opens a socket. It checks that every input belongs to the wallet, has the expected network-specific BIP84 path and script, that change is ours and that the fee clears the relay minimum. The online side refuses a signed PSBT that changed any input or output. QR frames are checksummed and then go through the same checks; they are public data, not encrypted |
+| Network | HTTPS-only with certificate checks (no HTTP or HTTPS-to-HTTP redirects), response size caps, rate pacing, failover, chain-aware URL guard. Server data is treated as untrusted; amounts are bounded, txids validated and terminal control characters stripped |
+| Mainnet gate | Disabled until an explicit marker or session token, a typed confirmation per session, and warnings on every mainnet screen. This is an accident guard, not an audit |
+| Process | No core dumps, umask 077, 5-minute idle lock; non-dumpable on Linux/Android |
 
 Cryptographic primitives come from audited libraries (rust-bitcoin, libsecp256k1, RustCrypto).
 Cairn does not implement its own cryptography. See [SECURITY.md](SECURITY.md) for the threat model,
-known limits and how to report a vulnerability.
+known limits and how to report a vulnerability. An internal review is documented in
+[SECURITY-REVIEW.md](SECURITY-REVIEW.md); it is not a substitute for an independent audit.
 
 ## Install
 
@@ -62,8 +84,9 @@ PSBTs can travel as files (binary; hex text is also accepted) or as QR frames.
    `CREATE`. The unsigned BIP174 PSBT is written to the file.
 2. **Offline — sign:** copy the file over and run `cairn --offline unsigned.psbt --out signed.psbt`
    on a machine with no network. It checks that the inputs belong to the wallet, that each key
-   origin is `m/84'/1'/0'/chain/index`, that the coin scripts match, that change is yours and that
-   the fee is at least 1 sat/vB. It then shows what is leaving the wallet and asks for `SEND`.
+   origin is `m/84'/coin'/0'/chain/index` for the wallet's network (coin `0` mainnet, `1` testnet),
+   that the coin scripts match, that change is yours and that the fee is at least 1 sat/vB. It then
+   shows what is leaving the wallet and asks for `SEND`.
 3. **Online — broadcast:** copy the signed file back and run
    `cairn --broadcast unsigned.psbt signed.psbt`. Cairn verifies the signed PSBT has exactly the same
    inputs and outputs as the unsigned one, shows the final details and asks for `SEND`.
@@ -94,18 +117,20 @@ The usual PSBT review still happens after scanning.
 
 ## Settings
 
-- **Network:** Settings in the main menu (Testnet4, Testnet3, Signet)
+- **Network:** Settings in the main menu (Testnet4, Testnet3, Signet; Mainnet only appears after
+  the opt-in and still asks for confirmation)
 - **Your own server:** `export CAIRN_API=https://your-server/testnet/api` (comma separated for several)
 
 ## Development
 
 ```
-cargo test --release -- --test-threads=1
-cargo clippy -- -D warnings
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --release -- --test-threads=1
 cargo audit
 ```
 
-Tests include the official BIP39 and BIP84 vectors, keystore tamper tests, signature
+Tests include the official BIP39 and BIP84 vectors, keystore tamper/network-relabel tests, signature
 verification, the offline PSBT verify/sign/roundtrip path and QR frame render/scan tests.
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -116,9 +141,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 - [x] Send with review and confirmation
 - [x] Provider failover and rate pacing
 - [x] Offline signer with PSBT and QR transfer (PSBT files and QR images; live camera optional)
+- [x] Gated, unaudited mainnet support
 - [ ] Optional passphrase (25th word), 2-of-3 multisig
 - [ ] Own-node support (Electrum protocol), Tor
-- [ ] Reproducible builds, fuzzing, independent audit
+- [ ] Reproducible builds, fuzzing, independent audit (required before recommending mainnet)
 
 ## License
 

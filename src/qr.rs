@@ -278,6 +278,7 @@ pub fn scan_images(paths: &[String]) -> Result<Vec<String>, String> {
         let mut limits = image::Limits::default();
         limits.max_image_width = Some(8_000);
         limits.max_image_height = Some(8_000);
+        limits.max_alloc = Some(64 * 1024 * 1024);
         reader.limits(limits);
         let img = reader
             .with_guessed_format()
@@ -371,6 +372,87 @@ mod tests {
         shuffled.reverse();
         shuffled.push(frames[1].clone());
         assert_eq!(reassemble(&shuffled).unwrap(), data);
+    }
+
+    #[test]
+    fn many_payload_sizes_roundtrip_under_shuffling() {
+        // Deterministic pseudo-random shuffling: exercises frame counts, chunk
+        // boundaries and duplicate/missing handling without a rand dependency.
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as usize
+        };
+        for len in (1..=1_400).step_by(23) {
+            for chunk in [1, 7, 13, 64, 199, CHUNK_BYTES] {
+                let data = bytes(len);
+                // Chunk 1 on a long payload legitimately exceeds MAX_FRAMES.
+                let Ok(frames) = encode_frames_with(&data, chunk) else {
+                    assert!(data.len() > MAX_FRAMES);
+                    continue;
+                };
+                assert!(!frames.is_empty());
+                assert_eq!(frames.len(), len.div_ceil(chunk.clamp(1, CHUNK_BYTES)));
+
+                let mut shuffled = frames.clone();
+                for i in (1..shuffled.len()).rev() {
+                    shuffled.swap(i, next() % (i + 1));
+                }
+                // Duplicate a few frames; duplicates must be harmless.
+                for _ in 0..3 {
+                    if !frames.is_empty() {
+                        shuffled.push(frames[next() % frames.len()].clone());
+                    }
+                }
+                assert_eq!(reassemble(&shuffled).unwrap(), data);
+
+                // Dropping any frame must be reported, never silently patched.
+                if frames.len() > 1 {
+                    let mut missing = frames.clone();
+                    missing.remove(next() % missing.len());
+                    assert!(reassemble(&missing).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_frames_are_rejected_without_panicking() {
+        let valid = encode_frames(&bytes(500)).unwrap();
+        let mut cases = vec![
+            String::new(),
+            ":".into(),
+            "CAIRN1".into(),
+            "CAIRN1:".into(),
+            "CAIRN1:1:0:00:".into(),
+            "CAIRN1:0:0:0000000000000000:00".into(),
+            "CAIRN1:257:0:0000000000000000:00".into(),
+            "CAIRN1:1:1:0000000000000000:00".into(),
+            "CAIRN1:1:0:zzzzzzzzzzzzzzzz:00".into(),
+            "CAIRN1:1:0:0000000000000000:".into(),
+            "CAIRN1:1:0:0000000000000000:0".into(),
+            "CAIRN1:1:0:0000000000000000:gg".into(),
+            format!(
+                "CAIRN1:1:0:0000000000000000:{}",
+                "00".repeat(CHUNK_BYTES + 1)
+            ),
+            "NOPE:1:0:0000000000000000:00".into(),
+        ];
+        // Mutations of real frames: truncation, extra separators and bad hex.
+        for frame in &valid {
+            for cut in [1, 5, frame.len() / 2, frame.len().saturating_sub(1)] {
+                cases.push(frame.chars().take(cut).collect());
+            }
+            cases.push(format!("{}:", frame));
+            cases.push(frame.replace(':', "::"));
+        }
+        for case in cases {
+            // The contract is "return an error", not "panic".
+            let _ = reassemble(&[case]);
+        }
+        assert!(reassemble(&valid).is_ok());
     }
 
     #[test]

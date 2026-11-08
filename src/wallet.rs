@@ -7,8 +7,9 @@
 use bip39::Mnemonic;
 use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpriv, Xpub};
 use bitcoin::psbt::Psbt;
-use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
-use bitcoin::{Address, CompressedPublicKey, Network, Witness};
+use bitcoin::secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
+use bitcoin::sighash::SighashCache;
+use bitcoin::{Address, CompressedPublicKey, EcdsaSighashType, Network, ScriptBuf, Witness};
 use std::str::FromStr;
 use zeroize::Zeroizing;
 
@@ -22,6 +23,19 @@ pub fn coin_type(network: Network) -> u32 {
 
 pub fn derivation_path(network: Network, chain: u32, index: u32) -> String {
     format!("m/84'/{}'/0'/{chain}/{index}", coin_type(network))
+}
+
+/// Strict BIP84 path check used by both signing paths.
+pub fn parse_bip84_path(path: &DerivationPath, network: Network) -> Option<(u32, u32)> {
+    let parts: Vec<&ChildNumber> = path.into_iter().collect();
+    match parts.as_slice() {
+        [ChildNumber::Hardened { index: 84 }, ChildNumber::Hardened { index: coin }, ChildNumber::Hardened { index: 0 }, ChildNumber::Normal { index: chain }, ChildNumber::Normal { index }]
+            if *coin == coin_type(network) && *chain <= 1 =>
+        {
+            Some((*chain, *index))
+        }
+        _ => None,
+    }
 }
 
 fn master(mnemonic: &Mnemonic, network: Network) -> Result<Xpriv, String> {
@@ -66,16 +80,25 @@ pub struct Watch {
 impl Watch {
     pub fn from_mnemonic(mnemonic: &Mnemonic, network: Network) -> Result<Self, String> {
         let secp = Secp256k1::new();
-        let master = master(mnemonic, network)?;
+        let mut master = master(mnemonic, network)?;
         let path = DerivationPath::from_str(&format!("m/84'/{}'/0'", coin_type(network)))
             .map_err(|e| e.to_string())?;
-        let acct = master
-            .derive_priv(&secp, &path)
-            .map_err(|e| e.to_string())?;
-        Ok(Watch {
-            xpub: Xpub::from_priv(&secp, &acct),
-            network,
-        })
+        let mut acct = match master.derive_priv(&secp, &path) {
+            Ok(acct) => acct,
+            Err(e) => {
+                master.private_key.non_secure_erase();
+                return Err(e.to_string());
+            }
+        };
+        let xpub = Xpub::from_priv(&secp, &acct);
+        // Only the public key is kept; erase the temporary private keys.
+        acct.private_key.non_secure_erase();
+        master.private_key.non_secure_erase();
+        Ok(Watch { xpub, network })
+    }
+
+    pub fn network(&self) -> Network {
+        self.network
     }
 
     pub fn xpub_string(&self) -> String {
@@ -90,7 +113,8 @@ impl Watch {
             .xpub
             .ckd_pub(&secp, ChildNumber::from_normal_idx(chain).map_err(e)?)
             .map_err(e)?;
-        (start..start + count)
+        let end = start.checked_add(count).ok_or("address range overflow")?;
+        (start..end)
             .map(|i| -> Result<String, String> {
                 let child = chain_key
                     .ckd_pub(&secp, ChildNumber::from_normal_idx(i).map_err(e)?)
@@ -129,6 +153,7 @@ impl Watch {
 pub struct Signer {
     master: Xpriv,
     account: Xpriv,
+    network: Network,
 }
 
 impl Signer {
@@ -144,7 +169,15 @@ impl Signer {
                 return Err(e.to_string());
             }
         };
-        Ok(Signer { master, account })
+        Ok(Signer {
+            master,
+            account,
+            network,
+        })
+    }
+
+    pub fn network(&self) -> Network {
+        self.network
     }
 
     pub fn account_xpub(&self) -> Result<String, String> {
@@ -163,33 +196,87 @@ impl Signer {
             ChildNumber::from_normal_idx(chain).map_err(e)?,
             ChildNumber::from_normal_idx(index).map_err(e)?,
         ];
-        let child = self.account.derive_priv(&secp, &path).map_err(e)?;
-        let kp = child.to_keypair(&secp);
-        Ok((kp.secret_key(), kp.public_key()))
+        let mut child = self.account.derive_priv(&secp, &path).map_err(e)?;
+        let mut kp = child.to_keypair(&secp);
+        let sk = kp.secret_key();
+        let pk = kp.public_key();
+        // Best effort: drop intermediate secret copies as soon as possible.
+        kp.non_secure_erase();
+        child.private_key.non_secure_erase();
+        Ok((sk, pk))
     }
 
     /// Sign every P2WPKH input of `psbt` and finalize it for broadcasting.
+    ///
+    /// This deliberately does not use `Psbt::sign` followed by "pick the first
+    /// partial signature": each input is validated against exactly one BIP84 key
+    /// origin, the expected script and SIGHASH_ALL before a signature is made.
     /// Keys are found through the BIP174 `bip32_derivation` key origins.
     pub fn sign_psbt(&self, psbt: &mut Psbt) -> Result<(), String> {
         let secp = Secp256k1::new();
-        match psbt.sign(&self.master, &secp) {
-            Ok(_) => {}
-            Err((_used, errors)) => {
+        let tx = psbt.unsigned_tx.clone();
+        let mut cache = SighashCache::new(&tx);
+        let master_fp = self.fingerprint();
+        let mut jobs = Vec::with_capacity(psbt.inputs.len());
+
+        for (i, input) in psbt.inputs.iter().enumerate() {
+            if !input.partial_sigs.is_empty()
+                || input.final_script_witness.is_some()
+                || input.final_script_sig.is_some()
+            {
+                return Err(format!("input {i} is already signed"));
+            }
+            if input.bip32_derivation.len() != 1 {
+                return Err(format!("input {i} must have exactly one BIP32 key origin"));
+            }
+            let (origin_pubkey, (fp, path)) = input.bip32_derivation.iter().next().unwrap();
+            if *fp != master_fp {
                 return Err(format!(
-                    "could not sign {} input(s); first error: {:?}",
-                    errors.len(),
-                    errors.values().next()
+                    "input {i} belongs to a different wallet (fingerprint mismatch)"
                 ));
             }
+            let (chain, index) = parse_bip84_path(path, self.network)
+                .ok_or_else(|| format!("input {i} has an unexpected derivation path"))?;
+            let utxo = input
+                .witness_utxo
+                .as_ref()
+                .ok_or_else(|| format!("input {i} has no witness UTXO"))?;
+            if !matches!(input.ecdsa_hash_ty(), Ok(EcdsaSighashType::All)) {
+                return Err(format!("input {i} does not use SIGHASH_ALL"));
+            }
+            let sighash = cache
+                .p2wpkh_signature_hash(i, &utxo.script_pubkey, utxo.value, EcdsaSighashType::All)
+                .map_err(|e| e.to_string())?;
+            let (mut sk, pk) = self.key_at(chain, index)?;
+            if pk != *origin_pubkey {
+                sk.non_secure_erase();
+                return Err(format!("input {i}: key does not match this wallet"));
+            }
+            let expected = ScriptBuf::new_p2wpkh(&CompressedPublicKey(pk).wpubkey_hash());
+            if expected != utxo.script_pubkey {
+                sk.non_secure_erase();
+                return Err(format!("input {i}: key does not match the coin's script"));
+            }
+            // Validation is complete. Do not keep every input's secret key in
+            // memory at once; re-derive it for the signing pass below.
+            sk.non_secure_erase();
+            jobs.push((i, chain, index, pk, sighash));
         }
-        for (i, input) in psbt.inputs.iter_mut().enumerate() {
-            let (pk, sig) = input
-                .partial_sigs
-                .iter()
-                .next()
-                .map(|(k, v)| (*k, *v))
-                .ok_or_else(|| format!("input {i} was not signed"))?;
-            input.final_script_witness = Some(Witness::p2wpkh(&sig, &pk.inner));
+
+        for (i, chain, index, pk, sighash) in jobs {
+            let (mut sk, derived_pk) = self.key_at(chain, index)?;
+            if derived_pk != pk {
+                sk.non_secure_erase();
+                return Err(format!("input {i}: key derivation changed unexpectedly"));
+            }
+            let sig = secp.sign_ecdsa(&Message::from(sighash), &sk);
+            sk.non_secure_erase();
+            let signature = bitcoin::ecdsa::Signature {
+                signature: sig,
+                sighash_type: EcdsaSighashType::All,
+            };
+            let input = &mut psbt.inputs[i];
+            input.final_script_witness = Some(Witness::p2wpkh(&signature, &pk));
             input.partial_sigs.clear();
         }
         Ok(())
@@ -259,6 +346,18 @@ mod tests {
         assert_ne!(a0, w.address_at(0, 1).unwrap());
         assert_ne!(a0, w.address_at(1, 0).unwrap());
         assert!(w.xpub_string().starts_with("tpub"));
+    }
+
+    #[test]
+    fn strict_bip84_paths_are_network_aware() {
+        let test: DerivationPath = "m/84'/1'/0'/0/7".parse().unwrap();
+        let main: DerivationPath = "m/84'/0'/0'/1/9".parse().unwrap();
+        assert_eq!(parse_bip84_path(&test, Network::Testnet), Some((0, 7)));
+        assert_eq!(parse_bip84_path(&main, Network::Bitcoin), Some((1, 9)));
+        assert_eq!(parse_bip84_path(&main, Network::Testnet), None);
+        assert_eq!(parse_bip84_path(&test, Network::Bitcoin), None);
+        let wrong: DerivationPath = "m/44'/1'/0'/0/7".parse().unwrap();
+        assert_eq!(parse_bip84_path(&wrong, Network::Testnet), None);
     }
 
     #[test]

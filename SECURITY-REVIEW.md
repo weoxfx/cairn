@@ -1,0 +1,212 @@
+# Internal security review — 2026-11-08
+
+**Status: internal source review, NOT an independent audit.**
+
+This document records a source-level review of Cairn performed by the project's own tooling and
+maintainer workflow. It is not a third-party audit, not a penetration test, and not evidence that
+mainnet use is safe. The recommendation remains: do not use Cairn for real funds you cannot afford
+to lose until an independent audit and remediation are complete.
+
+## Scope
+
+Reviewed at commit state immediately before the review's fixes (working tree, version 0.2.0):
+
+- Wallet creation/import, BIP39/BIP32/BIP84 derivation, watch-only separation.
+- Encrypted keystore, KDF parameters, authenticated metadata, v1 compatibility, file handling.
+- Online send flow, coin selection, fee calculation, address/amount parsing, signing.
+- Offline PSBT verify/sign/broadcast path and QR transport.
+- Esplora HTTP layer, provider failover, chain-aware URL guard, untrusted response handling.
+- Mainnet opt-in gate, UI network labels, process hardening, docs and CI configuration.
+
+Dependencies were scanned with `cargo audit`. The review relied on manual reading and the existing
+test suite; it did not include formal verification, fuzzing, side-channel analysis, live mainnet
+testing or third-party code review.
+
+## Verification run
+
+All of the following passed after the fixes in this document:
+
+```
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --release -- --test-threads=1   # 37 passed
+cargo audit                                        # 0 vulnerabilities, 155 dependencies
+cargo build --locked --release
+```
+
+## Summary
+
+No critical or high-severity issue was found that would let a remote API server, PSBT file or QR
+image exfiltrate the seed or forge a signature under the documented threat model. The signing and
+keystore designs are small and use audited primitives; no home-made cryptography was found.
+
+Several medium/low issues were found around **untrusted numeric input, terminal output, memory
+bounds and secret hygiene**. All were fixed in this review. The remaining items are accepted risks
+or require an independent audit to assess properly.
+
+## Findings
+
+| ID | Severity | Area | Status |
+|---|---|---|---|
+| S-01 | Medium | Unbounded server/PSBT amounts | Fixed |
+| S-02 | Medium | Terminal escape injection from server text | Fixed |
+| S-03 | Medium | Memory amplification from API responses | Fixed |
+| S-04 | Low | Unbounded PSBT file read / FIFO hang | Fixed |
+| S-05 | Low | QR image decode allocation limits | Fixed |
+| S-06 | Low | Secret erasure gaps and long-lived per-input keys | Fixed |
+| S-07 | Low | CI workflow would not run on GitHub | Fixed |
+| S-08 | Low | Mainnet banner state after cancelling confirmation | Fixed |
+| S-09 | Low | KDF upper bound allows local 1 GiB work factor | Accepted |
+| S-10 | Info | Cross-host HTTPS redirects | Accepted |
+| S-11 | Info | Mainnet marker is forgeable by same-user malware | Accepted |
+| S-12 | Info | No `mlock`; terminal wiping is best effort | Accepted |
+| S-13 | Info | Testnet variants share coin type 1 and URL-based identification | Accepted |
+
+### S-01 — Unbounded server/PSBT amounts (fixed)
+
+**Impact:** a malicious or compromised API server, or a crafted PSBT, could supply values above the
+21 million BTC supply. This could produce misleading review screens, overflow later casts to `i64`,
+or make the wallet construct an obviously invalid transaction. It does not directly steal coins:
+BIP143 signatures commit to each spent output's value, so a lie about a value normally makes the
+transaction invalid rather than redirecting funds.
+
+**Fix:** added `network::MAX_MONEY_SATS` and enforced it in:
+
+- `esplora::parse_utxo` (server UTXO values) plus checked conversion of `vout` to `u32`.
+- `send::plan` (aggregate input total).
+- `offline::verify_psbt` (per-input, total input, per-output and total output).
+- `offline::broadcast` (documented transaction outputs and witness UTXOs).
+
+Regression tests cover absurd UTXO, input and output values.
+
+### S-02 — Terminal escape injection from server text (fixed)
+
+**Impact:** server-controlled strings were printed more or less directly in two places: the `txid`
+field in the transaction list and HTTP error/broadcast response bodies. A malicious API could embed
+ANSI/OSC control sequences, potentially spoofing terminal output or abusing terminal features such
+as clipboard access. No key material was exposed.
+
+**Fix:** transaction txids are parsed as `bitcoin::Txid` and invalid entries are skipped. Error bodies
+and unexpected broadcast responses are passed through `safe_text`, which strips control characters
+and bounds length. A regression test checks the sanitiser and `parse_utxo` validation.
+
+### S-03 — Memory amplification from API responses (fixed)
+
+**Impact:** `transactions` fetched a page for every used address and retained all parsed pages before
+processing, and UTXO fetching could accumulate an unbounded number of entries within the response
+body cap. A malicious server could force large memory use on a phone or small machine.
+
+**Fix:** transaction pages are processed in bounded batches; total transaction summaries are capped
+at 100,000; UTXOs are capped at 10,000 per address and 20,000 per wallet. Oversized or absurd
+responses fail closed with an error instead of being retained.
+
+### S-04 — Unbounded PSBT file read / FIFO hang (fixed)
+
+**Impact:** PSBT files were read with `fs::read`, without a size cap, and opening a FIFO could block
+the process indefinitely. This is primarily a local denial-of-service / robustness issue.
+
+**Fix:** PSBTs are capped at 5 MB, opened with `O_NONBLOCK` and required to be regular files. Tests
+cover oversized files and directories.
+
+### S-05 — QR image decode allocation limits (fixed)
+
+**Impact:** decoding attacker-supplied images could allocate very large buffers before QR detection.
+
+**Fix:** image dimensions are capped at 8000×8000 and decoder allocation at 64 MiB. QR frame
+reassembly was already bounded to 256 frames × 200 bytes and validates frame counts, indexes,
+checksums and chunk lengths.
+
+### S-06 — Secret erasure gaps (fixed)
+
+**Impact:** several temporary copies of private key material were dropped without a best-effort
+erase, and `Signer::sign_psbt` kept every input's derived secret key in a vector until the signing
+pass. This is a memory-hygiene issue, not a known extraction path.
+
+**Fix:** `Watch::from_mnemonic` and `keystore::fingerprint` erase temporary `Xpriv` material;
+`Signer::key_at` erases the derived child key and keypair; `sign_psbt` validates with a short-lived
+key, erases it, then re-derives one key at a time while signing. Online `send::sign` also erases the
+per-input key after use. Erasure remains best effort because Rust moves and compiler optimisations can
+leave copies.
+
+### S-07 — CI workflow location (fixed)
+
+**Impact:** `ci.yml` was at the repository root, where GitHub Actions does not look, so the intended
+format/clippy/test/audit gates would not run.
+
+**Fix:** moved to `.github/workflows/ci.yml`. The workflow pins Rust 1.98.1, uses `--locked`, denies
+clippy warnings, runs tests single-threaded and denies `cargo audit` warnings.
+
+### S-08 — Mainnet banner after cancel (fixed)
+
+**Impact:** cancelling the typed mainnet confirmation could leave the terminal displaying the red
+mainnet banner while the session was still effectively testnet/default. Cosmetic and potentially
+confusing, not an authorisation bypass.
+
+**Fix:** reset the display network to testnet when confirmation is cancelled.
+
+### S-09 — KDF upper bound allows local work-factor DoS (accepted)
+
+A locally modified wallet file can select KDF parameters up to 1 GiB / 20 passes / parallelism 16.
+Validation rejects weaker parameters and the AAD authenticates the parameters for v2, but the work is
+performed before authentication fails. An attacker who can already write the wallet file can simply
+delete or corrupt it, so this is accepted as a local availability risk.
+
+### S-10 — Cross-host HTTPS redirects (accepted)
+
+The client refuses HTTP and HTTPS-to-HTTP redirects, but ordinary HTTPS redirects to another host are
+still followed. No secrets are sent and responses are untrusted, so the main effect is provider
+availability and metadata exposure. Disabling redirects entirely is a possible future hardening.
+
+### S-11 — Mainnet marker is an accident guard (accepted)
+
+`~/.cairn/mainnet-enabled` is a plain file, and the environment token is process-controlled. Malware
+running as the user can create or set either. The gate exists to prevent accidental mainnet use, not
+to resist a compromised account. This is documented in `SECURITY.md`.
+
+### S-12 — No memory locking; terminal wiping is best effort (accepted)
+
+Secrets are not `mlock`ed, so swap/hibernation can capture them. The seed display uses the terminal's
+alternate screen and clears it afterwards, but terminal emulators, tmux logging and screen capture may
+retain it. Users must trust the device and terminal.
+
+### S-13 — Testnet variants share coin type 1 (accepted)
+
+Testnet4, Testnet3 and Signet share BIP84 coin type 1 and the same address prefixes. The API setting
+and URL guard select the chain; there is no cryptographic chain identifier in the address. A wrong
+testnet choice cannot lose real funds, but it can show the wrong testnet history. Mainnet is separated
+by coin type 0 and address prefix.
+
+## Positive observations
+
+- The keystore uses Argon2id and ChaCha20-Poly1305 from RustCrypto, with random salt and nonce per
+  save. v2 AAD binds network, fingerprint, KDF parameters, salt and nonce; relabelling or parameter
+  downgrade fails authentication.
+- v1 files are accepted only as testnet, matching their historical scope.
+- Wallet files are created atomically with mode 0600, read with `O_NOFOLLOW`, size limits and a
+  regular-file check.
+- The watch-only session keeps only an account xpub; the seed is dropped after unlock.
+- Both signing paths validate each input's fingerprint, network-specific BIP84 path, P2WPKH script
+  and `SIGHASH_ALL` before signing. `Signer::sign_psbt` deliberately does not trust the first partial
+  signature.
+- Offline `--broadcast` compares the signed PSBT's unsigned transaction and input metadata with the
+  original unsigned file, and the offline review classifies change against the wallet's scripts.
+- The mainnet gate fails closed: marker/env opt-in, typed confirmation, chain-aware `net_for`, and a
+  URL guard that rejects cross-chain endpoints.
+- `cargo audit` is clean and the dependency set is small.
+
+## Residual risk and release recommendation
+
+This review does not replace an independent audit. Before mainnet is recommended or described as
+safe, the project still needs at least:
+
+1. An independent third-party audit of keystore, derivation, signing, PSBT and network paths, with
+   remediation of findings.
+2. Fuzzing of PSBT, QR frame, image and JSON parsers.
+3. Live integration tests against each supported Esplora provider and testnet, plus a mainnet
+   dry-run plan that does not risk funds.
+4. Platform testing on Linux, macOS and Termux/Android, including terminal behaviour and process
+   hardening differences.
+5. A decision on memory locking, cross-host redirects and stronger local-file DoS limits.
+
+Until then: keep testnet as the default, keep mainnet opt-in and clearly labelled unaudited, and do
+not use Cairn for meaningful real funds.

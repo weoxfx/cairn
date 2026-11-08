@@ -8,17 +8,17 @@ Thanks for helping! Security review is the most valuable contribution of all.
 2. **Minimal dependencies.** Every new crate needs a clear reason, and must pass `cargo audit`.
 3. **Secrets never leak.** No logging, printing, clipboard, telemetry or plain-text storage of seeds,
    passwords or keys. Wipe sensitive data when done (`zeroize`).
-4. **Testnet only** until an independent audit is complete.
+4. **Mainnet is opt-in and unaudited.** Testnet stays the default. Never present mainnet as safe,
+   never remove the warnings or the typed confirmations, and never mark it as audited.
 5. **Tests required** for anything touching keys, signing, fees or the keystore. Prefer official
-   test vectors (BIP39, BIP32, BIP84, BIP174).
+   test vectors (BIP39, BIP32, BIP84, BIP174). Cover both networks where a path is network-aware.
 
 ## Build and test
 
 ```
-cargo build
-cargo test --release -- --test-threads=1
-cargo clippy -- -D warnings
-cargo fmt
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --release -- --test-threads=1
 cargo audit
 ```
 

@@ -1,10 +1,23 @@
 //! Terminal UI helpers: theme, banner, spinner, boxes, secret screen.
 
+use bitcoin::Network;
 use console::{measure_text_width, style, Term};
 use dialoguer::{theme::ColorfulTheme, Input, Select};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
+
+static DISPLAY_NETWORK: Mutex<Network> = Mutex::new(Network::Testnet);
+
+/// Keep every screen honest about which chain this session is using.
+pub fn set_network(network: Network) {
+    *DISPLAY_NETWORK.lock().unwrap_or_else(|e| e.into_inner()) = network;
+}
+
+pub fn display_network() -> Network {
+    *DISPLAY_NETWORK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 pub fn theme() -> ColorfulTheme {
     ColorfulTheme::default()
@@ -17,15 +30,29 @@ pub fn clear() {
 
 pub fn banner() {
     clear();
-    println!(
-        "{}  {}",
-        style("◆ CAIRN").cyan().bold(),
-        style(" TESTNET ").black().on_yellow()
-    );
-    println!(
-        "{}\n",
-        style("experimental · unaudited · no real funds").dim()
-    );
+    if display_network() == Network::Bitcoin {
+        println!(
+            "{}  {}",
+            style("◆ CAIRN").red().bold(),
+            style(" MAINNET ").white().on_red().bold()
+        );
+        println!(
+            "{}\n",
+            style("experimental · unaudited · REAL FUNDS AT RISK")
+                .red()
+                .bold()
+        );
+    } else {
+        println!(
+            "{}  {}",
+            style("◆ CAIRN").cyan().bold(),
+            style(" TESTNET ").black().on_yellow()
+        );
+        println!(
+            "{}\n",
+            style("experimental · unaudited · no real funds").dim()
+        );
+    }
 }
 
 pub fn ok(msg: &str) {

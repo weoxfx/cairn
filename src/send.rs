@@ -2,9 +2,9 @@
 //! Native SegWit (P2WPKH) inputs only. Deterministic (RFC6979) ECDSA signing via libsecp256k1.
 
 use crate::esplora::{self, Utxo, WalletState};
-use crate::ui::{banner, boxed, fail, fmt_btc, menu, ok, pause, spin, theme};
+use crate::network;
+use crate::ui::{banner, boxed, fmt_btc, menu, ok, pause, spin, theme};
 use crate::wallet::{derivation_path, Signer, Watch};
-use crate::{keystore, NETWORK};
 use bitcoin::absolute::LockTime;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::bip32::{DerivationPath, Fingerprint};
@@ -14,27 +14,31 @@ use bitcoin::secp256k1::{Message, Secp256k1};
 use bitcoin::sighash::SighashCache;
 use bitcoin::transaction::Version;
 use bitcoin::{
-    Address, Amount, CompressedPublicKey, Denomination, EcdsaSighashType, OutPoint, ScriptBuf,
-    Sequence, Transaction, TxIn, TxOut, Witness,
+    Address, Amount, CompressedPublicKey, Denomination, EcdsaSighashType, Network, OutPoint,
+    ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
 };
 use console::style;
-use dialoguer::{Input, Password};
+use dialoguer::Input;
 use std::collections::HashMap;
-use std::time::Duration;
-use zeroize::Zeroizing;
 
 const DUST: u64 = 294; // P2WPKH dust threshold in sats
+const MAX_MONEY: u64 = network::MAX_MONEY_SATS;
 const TYPICAL_VBYTES: u64 = 141; // 1 input + 2 outputs, for fee previews
 
 // ---------- parsing ----------
 
-pub fn parse_address(s: &str) -> Result<Address, String> {
+pub fn parse_address(s: &str, network: Network) -> Result<Address, String> {
     let a: Address<NetworkUnchecked> = s
         .trim()
         .parse()
         .map_err(|e| format!("Not a valid Bitcoin address: {e}"))?;
-    a.require_network(NETWORK)
-        .map_err(|_| "Wrong network: need a testnet address starting with tb1".to_string())
+    a.require_network(network).map_err(|_| {
+        if network == Network::Bitcoin {
+            "Wrong network: need a mainnet address starting with bc1".to_string()
+        } else {
+            "Wrong network: need a testnet address starting with tb1".to_string()
+        }
+    })
 }
 
 /// Ok(None) means "send everything".
@@ -54,6 +58,9 @@ pub fn parse_amount(s: &str) -> Result<Option<u64>, String> {
     };
     if sats == 0 {
         return Err("Amount must be more than zero".into());
+    }
+    if sats > MAX_MONEY {
+        return Err("Amount exceeds the 21 million BTC supply".into());
     }
     Ok(Some(sats))
 }
@@ -88,7 +95,13 @@ pub fn plan(
     utxos.sort_by_key(|a| std::cmp::Reverse(a.value));
     match amount {
         None => {
-            let total: u64 = utxos.iter().map(|u| u.value).sum();
+            let total = utxos
+                .iter()
+                .try_fold(0u64, |acc, u| acc.checked_add(u.value))
+                .ok_or("amount overflow")?;
+            if total > MAX_MONEY {
+                return Err("input total exceeds the 21 million BTC supply".into());
+            }
             let fee = fee_for(rate, vsize(utxos.len(), 1));
             if utxos.is_empty() || total < fee + DUST {
                 return Err("Balance is too small to cover the fee".into());
@@ -109,7 +122,10 @@ pub fn plan(
             let mut sel: Vec<Utxo> = vec![];
             let mut sum = 0u64;
             for u in utxos {
-                sum += u.value;
+                sum = sum.checked_add(u.value).ok_or("amount overflow")?;
+                if sum > MAX_MONEY {
+                    return Err("input total exceeds the 21 million BTC supply".into());
+                }
                 sel.push(u);
                 let fee_change = fee_for(rate, vsize(sel.len(), 2));
                 let fee_plain = fee_for(rate, vsize(sel.len(), 1));
@@ -199,13 +215,13 @@ pub fn build_psbt(
         let (chain, index) = *keymap
             .get(&u.address)
             .ok_or("coin belongs to an unknown address")?;
-        let path: DerivationPath = derivation_path(NETWORK, chain, index)
+        let path: DerivationPath = derivation_path(watch.network(), chain, index)
             .parse()
             .map_err(|e: bitcoin::bip32::Error| e.to_string())?;
         let input = &mut psbt.inputs[i];
         input.witness_utxo = Some(TxOut {
             value: Amount::from_sat(u.value),
-            script_pubkey: parse_address(&u.address)?.script_pubkey(),
+            script_pubkey: parse_address(&u.address, watch.network())?.script_pubkey(),
         });
         input
             .bip32_derivation
@@ -228,17 +244,22 @@ pub fn sign(
         let (chain, idx) = keymap
             .get(&u.address)
             .ok_or("coin belongs to an unknown address")?;
-        let (sk, pk) = signer.key_at(*chain, *idx)?;
-        let spk = parse_address(&u.address)?.script_pubkey();
-        // The key we derived must really be the one that locks this coin.
-        let expected = ScriptBuf::new_p2wpkh(&CompressedPublicKey(pk).wpubkey_hash());
-        if expected != spk {
-            return Err("internal check failed: key does not match coin".into());
-        }
-        let sighash = cache
-            .p2wpkh_signature_hash(i, &spk, Amount::from_sat(u.value), EcdsaSighashType::All)
-            .map_err(|e| e.to_string())?;
-        let sig = secp.sign_ecdsa(&Message::from(sighash), &sk);
+        let (sig, pk) = {
+            let spk = parse_address(&u.address, signer.network())?.script_pubkey();
+            let sighash = cache
+                .p2wpkh_signature_hash(i, &spk, Amount::from_sat(u.value), EcdsaSighashType::All)
+                .map_err(|e| e.to_string())?;
+            let (mut sk, pk) = signer.key_at(*chain, *idx)?;
+            // The key we derived must really be the one that locks this coin.
+            let expected = ScriptBuf::new_p2wpkh(&CompressedPublicKey(pk).wpubkey_hash());
+            if expected != spk {
+                sk.non_secure_erase();
+                return Err("internal check failed: key does not match coin".into());
+            }
+            let sig = secp.sign_ecdsa(&Message::from(sighash), &sk);
+            sk.non_secure_erase();
+            (sig, pk)
+        };
         let signature = Signature {
             signature: sig,
             sighash_type: EcdsaSighashType::All,
@@ -260,23 +281,24 @@ fn pct(fee: u64, amount: u64) -> f64 {
 
 /// Show the standard transaction review box. Used by the online send flow and
 /// by offline PSBT creation (which uses the same [`Plan`]).
-pub fn review(p: &Plan) {
+pub fn review(p: &Plan, network: Network) {
+    let unit = network::unit(network);
     banner();
     println!("{}\n", style("Review transaction").bold());
     println!("  {}", style("To").dim());
     println!("  {}\n", style(p.to.to_string()).cyan().bold());
     let mut lines = vec![
         format!(
-            "{:<8}{} tBTC",
+            "{:<8}{} {unit}",
             "Amount",
             style(fmt_btc(p.amount as i64)).bold()
         ),
-        format!("{:<8}{} tBTC", "Fee", fmt_btc(p.fee as i64)),
+        format!("{:<8}{} {unit}", "Fee", fmt_btc(p.fee as i64)),
         format!("{:<8}{:.1} sat/vB, {} coin(s)", "", p.rate, p.inputs.len()),
     ];
     if let Some((_, v)) = &p.change {
         lines.push(format!(
-            "{:<8}{} tBTC (back to you)",
+            "{:<8}{} {unit} (back to you)",
             "Change",
             fmt_btc(*v as i64)
         ));
@@ -284,7 +306,7 @@ pub fn review(p: &Plan) {
         lines.push(format!("{:<8}none", "Change"));
     }
     lines.push(format!(
-        "{:<8}{} tBTC",
+        "{:<8}{} {unit}",
         "Total",
         style(fmt_btc((p.amount + p.fee) as i64)).yellow().bold()
     ));
@@ -308,22 +330,28 @@ pub fn review(p: &Plan) {
 
 /// Returns Ok(true) if a transaction was broadcast.
 pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Result<bool, String> {
+    let network = watch.network();
+    let net = esplora::net_for(network)?;
+    let unit = network::unit(network);
     banner();
-    println!("{}\n", style("Send (testnet)").bold());
+    println!(
+        "{}\n",
+        style(format!("Send ({})", network::label(network))).bold()
+    );
     if state.confirmed <= 0 {
         return Err("No confirmed funds to send yet. Wait for confirmations, then Refresh.".into());
     }
     println!(
-        "Available (confirmed): {} tBTC\n",
+        "Available (confirmed): {} {unit}\n",
         style(fmt_btc(state.confirmed)).green()
     );
 
     let to_str: String = Input::with_theme(&theme())
         .with_prompt("Recipient address")
-        .validate_with(|s: &String| -> Result<(), String> { parse_address(s).map(|_| ()) })
+        .validate_with(|s: &String| -> Result<(), String> { parse_address(s, network).map(|_| ()) })
         .interact_text()
         .map_err(|e| e.to_string())?;
-    let to = parse_address(&to_str)?;
+    let to = parse_address(&to_str, network)?;
 
     let amt_str: String = Input::with_theme(&theme())
         .with_prompt("Amount (e.g. 0.0005, 50000 sats, or max)")
@@ -341,8 +369,8 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
             .filter(|a| keymap.contains_key(*a))
             .cloned()
             .collect();
-        let utxos = esplora::utxos_for(&addrs)?;
-        Ok((utxos, keymap, esplora::fee_rates().ok()))
+        let utxos = esplora::utxos_for(net, &addrs)?;
+        Ok((utxos, keymap, esplora::fee_rates(net).ok()))
     })?;
     let (utxos, keymap, rates) = loaded;
     if utxos.is_empty() {
@@ -391,18 +419,27 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
             .map_err(|e| e.to_string())?,
     };
 
-    let change_addr = parse_address(&watch.address_at(1, state.next_change)?)?;
+    let change_addr = parse_address(&watch.address_at(1, state.next_change)?, network)?;
     let p = plan(utxos, to, amount, rate, change_addr)?;
 
     // Sanity: numbers must add up exactly.
-    let total_in: u64 = p.inputs.iter().map(|u| u.value).sum();
+    let total_in = p
+        .inputs
+        .iter()
+        .try_fold(0u64, |acc, u| acc.checked_add(u.value))
+        .ok_or("amount overflow")?;
     let change_v = p.change.as_ref().map(|c| c.1).unwrap_or(0);
-    if total_in != p.amount + p.fee + change_v {
+    let expected = p
+        .amount
+        .checked_add(p.fee)
+        .and_then(|v| v.checked_add(change_v))
+        .ok_or("amount overflow")?;
+    if total_in != expected {
         return Err("internal error: amounts do not add up. Nothing was sent.".into());
     }
 
     // Review screen.
-    review(&p);
+    review(&p, network);
 
     let confirm: String = Input::with_theme(&theme())
         .with_prompt("Type SEND to confirm (anything else cancels)")
@@ -415,32 +452,14 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
         return Ok(false);
     }
 
-    // Password again, then unlock keys just for signing.
-    let mut signer: Option<Signer> = None;
-    for attempt in 0..3u32 {
-        let pw = Zeroizing::new(
-            Password::with_theme(&theme())
-                .with_prompt("Password to sign")
-                .interact()
-                .map_err(|e| e.to_string())?,
-        );
-        match spin("Unlocking keys…", || keystore::open(name, &pw)) {
-            Ok((mnemonic, fp2)) => {
-                if fp2 != fp {
-                    return Err("Wallet fingerprint changed. Nothing was sent.".into());
-                }
-                let s = Signer::from_mnemonic(&mnemonic, NETWORK)?;
-                drop(mnemonic);
-                signer = Some(s);
-                break;
-            }
-            Err(e) => {
-                fail(&e);
-                std::thread::sleep(Duration::from_secs(1 + attempt as u64));
-            }
-        }
+    // Password again, then unlock keys just for signing. This goes through the
+    // same retry policy as opening a wallet.
+    let opened = crate::unlock_wallet_with(name, Some(fp), "Password to sign")?;
+    if opened.network != network {
+        return Err("Wallet network changed. Nothing was sent.".into());
     }
-    let signer = signer.ok_or("Wrong password. Nothing was sent.")?;
+    let signer = Signer::from_mnemonic(&opened.mnemonic, network)?;
+    drop(opened);
     if signer.account_xpub()? != watch.xpub_string() {
         return Err("Keys do not match this wallet session. Nothing was sent.".into());
     }
@@ -454,7 +473,7 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
     let txid = tx.compute_txid().to_string();
     let hex = bitcoin::consensus::encode::serialize_hex(&tx);
 
-    match spin("Broadcasting…", || esplora::broadcast(&hex)) {
+    match spin("Broadcasting…", || esplora::broadcast(net, &hex)) {
         Ok(server_txid) => {
             banner();
             ok("Transaction sent");
@@ -497,12 +516,12 @@ mod tests {
         }
     }
 
-    fn addrs() -> (String, Address, Address, Watch) {
+    fn addrs(network: Network) -> (String, Address, Address, Watch) {
         let m = Mnemonic::parse(ABANDON).unwrap();
-        let w = Watch::from_mnemonic(&m, NETWORK).unwrap();
+        let w = Watch::from_mnemonic(&m, network).unwrap();
         let a0 = w.address_at(0, 0).unwrap();
-        let to = parse_address(&w.address_at(0, 1).unwrap()).unwrap();
-        let change = parse_address(&w.address_at(1, 0).unwrap()).unwrap();
+        let to = parse_address(&w.address_at(0, 1).unwrap(), network).unwrap();
+        let change = parse_address(&w.address_at(1, 0).unwrap(), network).unwrap();
         (a0, to, change, w)
     }
 
@@ -511,27 +530,54 @@ mod tests {
         assert_eq!(parse_amount("max").unwrap(), None);
         assert_eq!(parse_amount("0.0005").unwrap(), Some(50_000));
         assert_eq!(parse_amount("1500 sats").unwrap(), Some(1_500));
+        assert_eq!(parse_amount("  1 sat  ").unwrap(), Some(1));
+        assert_eq!(parse_amount("0.00000001").unwrap(), Some(1));
+        assert_eq!(
+            parse_amount("20999999.99999999").unwrap(),
+            Some(2_099_999_999_999_999)
+        );
+        assert_eq!(parse_amount("21000000").unwrap(), Some(MAX_MONEY));
+        assert!(parse_amount("21000000.00000001").is_err());
+        assert!(parse_amount("21000001").is_err());
         assert!(parse_amount("0").is_err());
         assert!(parse_amount("abc").is_err());
         assert!(parse_amount("0.123456789").is_err());
         assert!(parse_amount("-1").is_err());
+        assert!(parse_amount("1e3").is_err());
+        assert!(parse_amount("0x10 sats").is_err());
+        assert!(parse_amount("18446744073709551616 sats").is_err());
+        // Whitespace-only and unicode digits must not be accepted as money.
+        assert!(parse_amount("   ").is_err());
+        assert!(parse_amount("١٢٣").is_err());
     }
 
     #[test]
     fn address_validation() {
-        let (a0, _, _, _) = addrs();
-        assert!(parse_address(&a0).is_ok());
+        let (a0, _, _, _) = addrs(Network::Testnet);
+        assert!(parse_address(&a0, Network::Testnet).is_ok());
         assert!(
-            parse_address("bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu").is_err(),
-            "mainnet must be rejected"
+            parse_address(
+                "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu",
+                Network::Testnet
+            )
+            .is_err(),
+            "mainnet must be rejected by a testnet wallet"
         );
-        assert!(parse_address("tb1qnotanaddress").is_err());
-        assert!(parse_address("").is_err());
+        assert!(parse_address("tb1qnotanaddress", Network::Testnet).is_err());
+        assert!(parse_address("", Network::Testnet).is_err());
+
+        let (m_addr, _, _, _) = addrs(Network::Bitcoin);
+        assert!(parse_address(&m_addr, Network::Bitcoin).is_ok());
+        assert!(m_addr.starts_with("bc1q"));
+        assert!(
+            parse_address(&a0, Network::Bitcoin).is_err(),
+            "testnet must be rejected by a mainnet wallet"
+        );
     }
 
     #[test]
     fn plan_with_change() {
-        let (a0, to, change, _) = addrs();
+        let (a0, to, change, _) = addrs(Network::Testnet);
         let p = plan(vec![utxo(100_000, &a0)], to, Some(30_000), 1.0, change).unwrap();
         assert_eq!(p.fee, 141);
         let c = p.change.as_ref().unwrap().1;
@@ -540,7 +586,12 @@ mod tests {
 
     #[test]
     fn plan_max_and_insufficient_and_dust() {
-        let (a0, to, change, _) = addrs();
+        let (a0, to, change, _) = addrs(Network::Testnet);
+        let too_much = vec![utxo(MAX_MONEY, &a0), utxo(MAX_MONEY, &a0)];
+        assert!(
+            plan(too_much, to.clone(), None, 1.0, change.clone()).is_err(),
+            "a server claiming more coins than exist must be rejected"
+        );
         let p = plan(
             vec![utxo(100_000, &a0)],
             to.clone(),
@@ -579,8 +630,8 @@ mod tests {
     #[test]
     fn signature_verifies() {
         let m = Mnemonic::parse(ABANDON).unwrap();
-        let (a0, to, change, _) = addrs();
-        let signer = Signer::from_mnemonic(&m, NETWORK).unwrap();
+        let (a0, to, change, _) = addrs(Network::Testnet);
+        let signer = Signer::from_mnemonic(&m, Network::Testnet).unwrap();
         let mut keymap = HashMap::new();
         keymap.insert(a0.clone(), (0u32, 0u32));
         let p = plan(vec![utxo(100_000, &a0)], to, Some(30_000), 2.0, change).unwrap();
@@ -595,7 +646,9 @@ mod tests {
         let wit = &tx.input[0].witness;
         let sig = Signature::from_slice(wit.nth(0).unwrap()).unwrap();
         let pk = bitcoin::secp256k1::PublicKey::from_slice(wit.nth(1).unwrap()).unwrap();
-        let spk = parse_address(&a0).unwrap().script_pubkey();
+        let spk = parse_address(&a0, Network::Testnet)
+            .unwrap()
+            .script_pubkey();
         let mut cache = SighashCache::new(&tx);
         let h = cache
             .p2wpkh_signature_hash(0, &spk, Amount::from_sat(100_000), EcdsaSighashType::All)

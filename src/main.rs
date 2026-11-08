@@ -1,6 +1,7 @@
 mod esplora;
 mod hardening;
 mod keystore;
+mod network;
 mod offline;
 mod qr;
 mod send;
@@ -12,16 +13,21 @@ use bitcoin::Network;
 use console::style;
 use dialoguer::{Input, Password};
 use qrcode::{render::unicode, QrCode};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use ui::{banner, boxed, clear, fail, fmt_btc, menu, ok, pause, short, spin, theme};
 use wallet::Watch;
 use zeroize::Zeroizing;
 
-// All supported nets (testnet3/4, signet) share the test network kind: tb1
-// addresses, tpub keys and coin type 1. `esplora::Net` only picks the server.
-const NETWORK: Network = Network::Testnet;
 const MIN_PASSWORD_LEN: usize = 12;
 const IDLE_LOCK: Duration = Duration::from_secs(300);
+const MAINNET_WARNING: &str = "\
+MAINNET IS UNAUDITED.\n\
+This software has not had an independent security audit. A bug can lose real money.\n\
+Use a hardware wallet or a reviewed wallet for anything you cannot afford to lose.\n\
+Testnet remains the default; mainnet is opt-in only.";
+
+static MAINNET_CONFIRMED_THIS_SESSION: AtomicBool = AtomicBool::new(false);
 
 fn main() {
     hardening::init();
@@ -48,6 +54,8 @@ fn run() -> Result<(), String> {
             help();
             Ok(())
         }
+        "--enable-mainnet" => enable_mainnet_cmd(),
+        "--disable-mainnet" => disable_mainnet_cmd(),
         "--create-psbt" => {
             let (pos, out) = parse_args(&args[1..])?;
             if pos.len() > 1 {
@@ -108,7 +116,7 @@ fn parse_args(args: &[String]) -> Result<(Vec<String>, Option<String>), String> 
 fn help() {
     println!(
         "\
-Cairn - experimental testnet Bitcoin wallet
+Cairn - experimental Bitcoin wallet (testnet by default)
 
 Usage:
   cairn                                      Interactive wallet
@@ -120,8 +128,76 @@ Usage:
   cairn --qr-show <FILE.psbt>                Show a PSBT as QR frame(s)
   cairn --qr-scan [--out FILE.psbt] <IMAGE>...
                                              Rebuild a PSBT from QR photos
+  cairn --enable-mainnet                     Opt in to unaudited mainnet use
+  cairn --disable-mainnet                    Remove the mainnet opt-in marker
   cairn --help                               Show this help"
     );
+}
+
+fn enable_mainnet_cmd() -> Result<(), String> {
+    ui::set_network(Network::Bitcoin);
+    banner();
+    println!("{}\n", style("Enable mainnet?").red().bold());
+    println!("{}\n", style(MAINNET_WARNING).red());
+    let answer: String = Input::with_theme(&theme())
+        .with_prompt("Type ENABLE MAINNET to opt in (anything else cancels)")
+        .allow_empty(true)
+        .interact_text()
+        .map_err(|e| e.to_string())?;
+    if answer.trim() != "ENABLE MAINNET" {
+        ui::set_network(Network::Testnet);
+        println!("\nCancelled. Mainnet remains disabled.");
+        return Ok(());
+    }
+    let path = network::enable()?;
+    banner();
+    ok("Mainnet opt-in saved");
+    println!("  Marker: {}", path.display());
+    println!(
+        "{}\n",
+        style("  Every mainnet session still asks you to confirm. This is not an audit.").yellow()
+    );
+    pause();
+    Ok(())
+}
+
+fn disable_mainnet_cmd() -> Result<(), String> {
+    let removed = network::disable()?;
+    ui::set_network(Network::Testnet);
+    banner();
+    if removed {
+        ok("Mainnet opt-in removed. New sessions default to testnet.");
+    } else {
+        ok("Mainnet was already disabled.");
+    }
+    println!(
+        "{}\n",
+        style("  Existing mainnet wallet files are untouched and can still be opened after re-enabling.")
+            .dim()
+    );
+    pause();
+    Ok(())
+}
+
+/// Ask once per process before doing anything with a mainnet wallet.
+pub(crate) fn confirm_mainnet_session() -> Result<(), String> {
+    if MAINNET_CONFIRMED_THIS_SESSION.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    ui::set_network(Network::Bitcoin);
+    banner();
+    println!("{}\n", style(MAINNET_WARNING).red().bold());
+    let answer: String = Input::with_theme(&theme())
+        .with_prompt("Type MAINNET to continue (anything else cancels)")
+        .allow_empty(true)
+        .interact_text()
+        .map_err(|e| e.to_string())?;
+    if answer.trim() != "MAINNET" {
+        ui::set_network(Network::Testnet);
+        return Err("Mainnet session cancelled.".into());
+    }
+    MAINNET_CONFIRMED_THIS_SESSION.store(true, Ordering::SeqCst);
+    Ok(())
 }
 
 fn interactive() -> Result<(), String> {
@@ -208,9 +284,29 @@ fn ask_new_password() -> Result<Zeroizing<String>, String> {
 
 // ---------- create / import / open ----------
 
+/// Testnet is the default. Mainnet only appears after the opt-in marker exists,
+/// and choosing it still requires the typed session confirmation.
+fn ask_network() -> Result<Network, String> {
+    if !network::enabled() {
+        return Ok(Network::Testnet);
+    }
+    let i = menu(&[
+        "Testnet (recommended, no real funds)",
+        "Mainnet (UNAUDITED, real funds)",
+    ])?;
+    if i == 1 {
+        confirm_mainnet_session()?;
+        Ok(Network::Bitcoin)
+    } else {
+        Ok(Network::Testnet)
+    }
+}
+
 fn create_wallet() -> Result<(), String> {
     banner();
     println!("{}\n", style("Create New Wallet").bold());
+    let network = ask_network()?;
+    ui::set_network(network);
     let name = ask_name()?;
     let password = ask_new_password()?;
 
@@ -270,9 +366,9 @@ fn create_wallet() -> Result<(), String> {
     }
 
     spin("Encrypting wallet…", || {
-        keystore::save(&name, &password, &mnemonic)
+        keystore::save(&name, &password, &mnemonic, network)
     })?;
-    let fp = keystore::fingerprint(&mnemonic)?;
+    let fp = keystore::fingerprint(&mnemonic, network)?;
     banner();
     ok(&format!("Wallet '{}' created", style(&name).bold()));
     println!("  Fingerprint: {fp}");
@@ -288,6 +384,8 @@ fn create_wallet() -> Result<(), String> {
 fn import_wallet() -> Result<(), String> {
     banner();
     println!("{}\n", style("Import Wallet").bold());
+    let network = ask_network()?;
+    ui::set_network(network);
     let name = ask_name()?;
     let phrase = Zeroizing::new(
         Password::with_theme(&theme())
@@ -299,11 +397,11 @@ fn import_wallet() -> Result<(), String> {
         Mnemonic::parse(phrase.trim()).map_err(|e| format!("Invalid seed phrase: {e}"))?;
     let password = ask_new_password()?;
     spin("Encrypting wallet…", || {
-        keystore::save(&name, &password, &mnemonic)
+        keystore::save(&name, &password, &mnemonic, network)
     })?;
     ok(&format!(
         "Imported. Fingerprint: {}",
-        keystore::fingerprint(&mnemonic)?
+        keystore::fingerprint(&mnemonic, network)?
     ));
     pause();
     Ok(())
@@ -325,24 +423,45 @@ pub(crate) fn choose_wallet(preselect: Option<&str>) -> Result<String, String> {
     Ok(wallets[i].clone())
 }
 
-pub(crate) fn unlock_wallet(name: &str) -> Result<(Mnemonic, String), String> {
+pub(crate) fn unlock_wallet(name: &str) -> Result<keystore::Opened, String> {
+    unlock_wallet_with(name, None, "Password")
+}
+
+/// Single password-retry policy for opening a wallet and for re-authenticating
+/// before signing. The expected fingerprint is optional, but when supplied it is
+/// checked *before* any spending key is derived.
+pub(crate) fn unlock_wallet_with(
+    name: &str,
+    expected_fp: Option<&str>,
+    prompt: &str,
+) -> Result<keystore::Opened, String> {
     // Growing delay after each wrong attempt, 5 tries max.
     let mut unlocked = None;
     for attempt in 0..5u32 {
         let pw = Zeroizing::new(
             Password::with_theme(&theme())
-                .with_prompt("Password")
+                .with_prompt(prompt)
                 .interact()
                 .map_err(|e| e.to_string())?,
         );
         match spin("Unlocking…", || keystore::open(name, &pw)) {
-            Ok(r) => {
-                unlocked = Some(r);
+            Ok(opened) => {
+                if expected_fp
+                    .map(|fp| opened.fingerprint.as_str() != fp)
+                    .unwrap_or(false)
+                {
+                    return Err("Wallet fingerprint changed. Nothing was signed.".into());
+                }
+                network::require_supported(opened.network)?;
+                if opened.network == Network::Bitcoin {
+                    confirm_mainnet_session()?;
+                }
+                unlocked = Some(opened);
                 break;
             }
             Err(e) => {
                 fail(&e);
-                std::thread::sleep(Duration::from_secs(2u64.pow(attempt)));
+                std::thread::sleep(Duration::from_secs(1u64 << attempt.min(3)));
             }
         }
     }
@@ -353,10 +472,13 @@ fn open_wallet() -> Result<(), String> {
     banner();
     println!("{}\n", style("Open Wallet").bold());
     let name = choose_wallet(None)?;
-    let (mnemonic, fp) = unlock_wallet(&name)?;
+    let opened = unlock_wallet(&name)?;
+    let network = opened.network;
+    ui::set_network(network);
     // Keep only the public account key; the seed is wiped from memory right here.
-    let watch = Watch::from_mnemonic(&mnemonic, NETWORK)?;
-    drop(mnemonic);
+    let watch = Watch::from_mnemonic(&opened.mnemonic, network)?;
+    let fp = opened.fingerprint.clone();
+    drop(opened);
     dashboard(&name, &fp, &watch)
 }
 
@@ -401,7 +523,7 @@ fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
                     format!(
                         "{} {}",
                         style(fmt_btc(s.confirmed)).green().bold(),
-                        style("tBTC").dim()
+                        style(network::unit(watch.network())).dim()
                     ),
                 ];
                 if s.unconfirmed != 0 {
@@ -501,17 +623,28 @@ fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
 }
 
 fn receive_screen(watch: &Watch, state: Option<&esplora::WalletState>) -> Result<(), String> {
+    let network = watch.network();
     let mut index = state.map(|s| s.next_receive).unwrap_or(0);
     loop {
         banner();
         let addr = watch.address_at(0, index)?;
-        println!("{}\n", style("Receive (testnet)").bold());
+        println!(
+            "{}\n",
+            style(format!("Receive ({})", network::label(network))).bold()
+        );
         println!("  {}", style(&addr).cyan().bold());
         println!(
             "  {}\n",
-            style(wallet::derivation_path(NETWORK, 0, index)).dim()
+            style(wallet::derivation_path(network, 0, index)).dim()
         );
-        println!("  Send only TESTNET coins here (e.g. from a faucet).");
+        if network == Network::Bitcoin {
+            println!(
+                "{}",
+                style("  REAL FUNDS. Verify this address on your device before sharing.").red()
+            );
+        } else {
+            println!("  Send only TESTNET coins here (e.g. from a faucet).");
+        }
         println!("  Use a fresh address for each payment.");
         if state.is_none() {
             println!(
@@ -558,7 +691,9 @@ fn transactions_screen(state: Option<&esplora::WalletState>) -> Result<(), Strin
     if s.used.is_empty() {
         println!("  No transactions yet.");
     } else {
-        match spin("Loading transactions…", || esplora::transactions(s)) {
+        match spin("Loading transactions…", || {
+            esplora::transactions(esplora::net_for(ui::display_network())?, s)
+        }) {
             Ok(txs) => {
                 if txs.is_empty() {
                     println!("  No transactions yet.");
@@ -589,12 +724,17 @@ fn transactions_screen(state: Option<&esplora::WalletState>) -> Result<(), Strin
 }
 
 fn info_screen(fp: &str, watch: &Watch) -> Result<(), String> {
+    let net = esplora::net_for(watch.network())?;
     banner();
     println!("{}\n", style("Wallet Info").bold());
     println!("  Fingerprint:   {fp}");
     println!("  Address type:  native SegWit (BIP84)");
-    println!("  Network:       {}", esplora::net().label());
-    println!("  API servers:   {}", esplora::providers_desc());
+    println!(
+        "  Network:       {} (wallet: {})",
+        net.label(),
+        network::label(watch.network())
+    );
+    println!("  API servers:   {}", esplora::providers_desc(net));
     println!(
         "  Seed in memory: {}",
         style("no (wiped after unlock)").green()
@@ -610,6 +750,14 @@ fn info_screen(fp: &str, watch: &Watch) -> Result<(), String> {
         "{}\n",
         style("  Seed words are never shown here. Use your paper backup.").dim()
     );
+    if watch.network() == Network::Bitcoin {
+        println!(
+            "{}\n",
+            style("  MAINNET: unaudited software holding real funds.")
+                .red()
+                .bold()
+        );
+    }
     pause();
     Ok(())
 }
@@ -618,25 +766,30 @@ fn settings() -> Result<(), String> {
     loop {
         banner();
         println!("{}\n", style("Settings").bold());
+        let current = esplora::net();
+        println!("  Network:     {}", style(current.label()).cyan().bold());
         println!(
-            "  Network:     {}",
-            style(esplora::net().label()).cyan().bold()
+            "  API servers: {}",
+            style(esplora::providers_desc(current)).dim()
         );
-        println!("  API servers: {}", style(esplora::providers_desc()).dim());
         println!(
             "{}\n",
             style("  Set CAIRN_API=https://your-server/api to use your own server.").dim()
         );
-        let items: Vec<String> = esplora::Net::ALL
+        let nets = esplora::selectable_nets();
+        let items: Vec<String> = nets
             .iter()
             .map(|n| format!("Use {}", n.label()))
             .chain(std::iter::once("Back".to_string()))
             .collect();
         let refs: Vec<&str> = items.iter().map(|s| s.as_str()).collect();
         let i = menu(&refs)?;
-        if i >= esplora::Net::ALL.len() {
+        if i >= nets.len() {
             return Ok(());
         }
-        esplora::set_net(esplora::Net::ALL[i])?;
+        if nets[i].is_mainnet() {
+            confirm_mainnet_session()?;
+        }
+        esplora::set_net(nets[i])?;
     }
 }
