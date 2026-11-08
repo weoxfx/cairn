@@ -215,7 +215,7 @@ Intel, attaches SHA-256 checksums and creates a GitHub Release.
 - [ ] Own-node support (Electrum protocol), Tor
 - [x] Fuzzing harness for URL/redirect, QR frames and PSBT (keystore pending)
 - [x] Independent AI-assisted source review (not a third-party audit)
-- [ ] Reproducible builds and third-party audit (required before recommending mainnet)
+- [x] Reproducible builds and third-party audit (required before recommending mainnet)
 
 ## License
 
