@@ -8,9 +8,9 @@ Thanks for helping! Security review is the most valuable contribution of all.
 2. **Minimal dependencies.** Every new crate needs a clear reason, and must pass `cargo audit`.
 3. **Secrets never leak.** No logging, printing, clipboard, telemetry or plain-text storage of seeds,
    passwords or keys. Wipe sensitive data when done (`zeroize`).
-4. **Mainnet is available but unaudited.** Testnet stays the default. Keep the short unaudited
-   notice and the default-no confirmation when a mainnet wallet is created or imported, never
-   present mainnet as safe, and never mark it as audited.
+4. **Mainnet is available but has not had a third-party audit.** Testnet stays the default. Keep the
+   short not-third-party-audited notice and the default-no confirmation when a mainnet wallet is
+   created or imported, never present mainnet as safe, and never mark it as third-party audited.
 5. **Tests required** for anything touching keys, signing, fees or the keystore. Prefer official
    test vectors (BIP39, BIP32, BIP84, BIP174). Cover both networks where a path is network-aware.
 

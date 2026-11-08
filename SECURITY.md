@@ -1,21 +1,25 @@
 # Security policy
 
-**Status: experimental, unaudited. Testnet is the default. Mainnet is available but is not
-recommended for real funds until an independent audit is complete.**
+**Status: experimental. Independent AI-assisted source review completed; no third-party audit.
+Testnet is the default. Mainnet is available but is not recommended for real funds until a
+third-party audit is complete.**
 
 ## Mainnet selection
 
 Mainnet is not the default. It is chosen when creating or importing a wallet, without a marker file
-or environment variable. That choice shows a short experimental/unaudited notice and asks for a
-default-no confirmation. Opening an existing wallet uses its recorded network without another
-prompt. This is an accident guard, not evidence of safety. It does not replace the independent audit
-that is still required before anyone should rely on Cairn for real money.
+or environment variable. That choice shows a short experimental/not-third-party-audited notice and
+asks for a default-no confirmation. Opening an existing wallet uses its recorded network without
+another prompt; there is no per-session network confirmation after that. This is an accident guard,
+not evidence of safety. It does not replace the third-party audit that is still required before
+anyone should rely on Cairn for real money.
 
 ## Review status
 
-An internal, source-level security review was completed on 2026-11-08. It is **not an independent
-audit** and does not change the pre-release requirement below. The findings, fixes and residual risks
-are recorded in [SECURITY-REVIEW.md](SECURITY-REVIEW.md).
+Internal and independent AI-assisted source-level reviews were completed on 2026-11-08. The
+independent review examined commit `b620147` and found no Critical or High code vulnerability under
+its documented threat model. Neither review is a **third-party audit**, and neither changes the
+pre-release requirement below. The findings, fixes, open issues and residual risks are recorded in
+[SECURITY-REVIEW.md](SECURITY-REVIEW.md).
 
 ## Reporting a vulnerability
 
@@ -70,10 +74,12 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
   literals are rejected to avoid parser differentials. Testnet4, Testnet3 and Signet each require
   their own URL segment, and mainnet rejects any testnet segment. Response size limits fail closed,
   with request pacing, provider failover, and no cross-chain endpoints.
-  Responses are treated as untrusted: amounts and balances are bounded, txids are validated and
-  terminal control characters plus invisible Unicode format characters are stripped before server
-  text reaches the screen. This prevents the common wrong-chain accident and response-driven
-  display/redirect attacks, not a malicious server in general.
+  Responses are treated as untrusted: UTXO/input/output and balance amounts are bounded, txids are
+  validated and terminal control characters plus a list of invisible Unicode format characters are
+  stripped before server text reaches the screen. The sanitiser list is not exhaustive (L-03), and
+  history net amounts and heights are display-only and not bounded (L-02). This prevents the common
+  wrong-chain accident and response-driven display/redirect attacks, not a malicious server in
+  general.
 - **Process:** core dumps disabled, umask 077. On Linux and Android the process is also marked
   non-dumpable; other platforms rely on the core-dump limit and OS protections.
 
@@ -88,6 +94,19 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
 - **Offline PSBT limits:** the offline machine cannot independently look up UTXO values, so the
   amounts it displays come from the PSBT file. Verify the total and fee against what the online
   wallet showed before signing. The offline PSBT checks do not replace reading the review screen.
+- **Fee checks differ:** the offline verifier applies the fee ceiling to non-wallet outputs;
+  `--broadcast` applies it to all outputs, including change, so it is looser for a PSBT signed
+  elsewhere (L-01). The absolute 1,000,000-sat cap still applies. Review the fee before broadcasting.
+- **PSBT review is not output-capped:** a crafted PSBT can contain many external outputs and flood
+  the review screen (L-04). Read the totals and do not approve a PSBT you did not expect.
+- **No per-session mainnet gate:** mainnet is confirmed only when a wallet is created or imported.
+  Opening it later, creating a PSBT, signing offline and broadcasting do not ask for network
+  confirmation again. The network is still authenticated in the keystore and bound to the API.
+- **Concurrent creation:** two processes creating the same wallet name can race and replace each
+  other's file (L-05). The seed remains on paper, but do not create the same wallet name twice at
+  once.
+- **Old config:** a `Mainnet` value left by an older version can make testnet wallets report a
+  network/API mismatch until Settings is changed (I-01).
 - Short-lived copies of secrets that libraries do not wipe (for example the password prompt and some
   key types). Erasing is best-effort. The decrypted mnemonic and signer keys are `mlock`ed when the
   OS allows it, but locking can be refused (for example by `RLIMIT_MEMLOCK`) and is not a guarantee;
@@ -101,8 +120,8 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
 - Address scanning stops at the configured gap and the 200-address ceiling. Activity beyond that
   window may not appear until a wider scan is implemented.
 - Weak passwords, screen capture and shoulder surfing.
-- No independent audit has been done. Mainnet support existing in the code is not an audit result and
-  must not be read as one.
+- No third-party audit has been done. Mainnet support existing in the code, or an AI-assisted
+  review of it, is not a third-party audit result and must not be read as one.
 
 ## Rules for contributors
 
@@ -110,13 +129,13 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
 - Keep dependencies minimal, pinned (commit `Cargo.lock`) and checked with `cargo audit`.
 - Never log, print or store secrets. Never add telemetry.
 - Anything touching keys, signing or the keystore needs tests and a careful review.
-- Never present mainnet as audited or recommended. Keep testnet the default and keep the
-  unaudited notice and confirmation.
+- Never present mainnet as third-party audited or recommended. Keep testnet the default and keep
+  the not-third-party-audited notice and confirmation.
 
 ## Before any release
 
 `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`,
 `cargo test --locked --release -- --test-threads=1`, `cargo audit`, review the diff of
-`Cargo.lock`, and sign the release. An independent audit and remediation are required before mainnet
+`Cargo.lock`, and sign the release. A third-party audit and remediation are required before mainnet
 is recommended or described as safe.
 

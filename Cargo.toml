@@ -2,7 +2,7 @@
 name = "cairn"
 version = "0.2.0"
 edition = "2021"
-description = "Experimental open-source Bitcoin CLI wallet (testnet by default; unaudited mainnet available)"
+description = "Experimental Bitcoin CLI wallet (testnet by default; mainnet source-reviewed, not third-party audited)"
 license = "MIT OR Apache-2.0"
 
 [lib]

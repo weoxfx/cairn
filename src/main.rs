@@ -22,7 +22,8 @@ use zeroize::Zeroizing;
 const MIN_PASSWORD_LEN: usize = 12;
 const IDLE_LOCK: Duration = Duration::from_secs(300);
 const MAINNET_NOTICE: &str = "\
-Cairn is experimental and has not had an independent security audit.
+Cairn is experimental. An independent AI-assisted source review is complete,
+but it is not a third-party security audit.
 Mainnet uses real bitcoin; testnet is recommended for trying it out.";
 
 fn main() {

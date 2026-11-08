@@ -1,15 +1,20 @@
-# Internal security review — 2026-11-08
+# Security review record — 2026-11-08
 
-**Status: internal source review, NOT an independent audit.**
+**Status: internal and independent AI-assisted source reviews; NOT a third-party audit.**
 
-This document records a source-level review of Cairn performed by the project's own tooling and
-maintainer workflow. It is not a third-party audit, not a penetration test, and not evidence that
-mainnet use is safe. The recommendation remains: do not use Cairn for real funds you cannot afford
-to lose until an independent audit and remediation are complete.
+This document records source-level reviews of Cairn performed by the project's own tooling and
+maintainer workflow, plus an independent AI-assisted review of `b620147`. None of them is a
+third-party audit, a penetration test, or evidence that mainnet use is safe. The recommendation
+remains: do not use Cairn for real funds you cannot afford to lose until a third-party audit and
+remediation are complete.
 
 ## Scope
 
-Reviewed at commit state immediately before the review's fixes (working tree, version 0.2.0):
+The internal review covered the working tree immediately before its fixes (version 0.2.0). The
+independent AI-assisted review covered code commit `b6201478018d06253fa176af74bb62f51852d2f8`
+("download updae"), tree `f2b391dade309f32ee436ddfd2699d29e5190c14`, with a clean working tree. That
+includes `a645b5f` ("mainnet update") and `b620147` (installer and release workflow), so the
+post-baseline mainnet change is in scope. Areas reviewed:
 
 - Wallet creation/import, BIP39/BIP32/BIP84 derivation, watch-only separation.
 - Encrypted keystore, KDF parameters, authenticated metadata, v1 compatibility, file handling.
@@ -34,6 +39,11 @@ cargo audit                                        # 0 vulnerabilities, 155 depe
 cargo build --locked --release
 ```
 
+The independent AI-assisted review separately ran on `b620147` with rustc/cargo 1.99.1 (the project
+pins 1.98.1): `cargo fmt --check --all` passed, `cargo clippy --locked --all-targets -- -D warnings`
+passed, `cargo test --locked --release -- --test-threads=1` passed 47/47, and `cargo audit` exited 0
+with no advisories (155 crates, 1,422 advisories loaded).
+
 ## Summary
 
 No critical or high-severity issue was found that would let a remote API server, PSBT file or QR
@@ -41,8 +51,9 @@ image exfiltrate the seed or forge a signature under the documented threat model
 keystore designs are small and use audited primitives; no home-made cryptography was found.
 
 Several medium/low issues were found around **untrusted numeric input, terminal output, memory
-bounds and secret hygiene**. All were fixed in this review. The remaining items are accepted risks
-or require an independent audit to assess properly.
+bounds and secret hygiene**. All were fixed in this internal review. The later independent review
+leaves M-02 and L-01..L-05 open; those are recorded below and require a third-party audit or a
+separate code change.
 
 ## Findings
 
@@ -77,7 +88,8 @@ transaction invalid rather than redirecting funds.
 - `offline::verify_psbt` (per-input, total input, per-output and total output).
 - `offline::broadcast` (documented transaction outputs and witness UTXOs).
 
-Regression tests cover absurd UTXO, input and output values.
+Regression tests cover absurd UTXO, input and output values. This does not cover transaction-history
+net amounts or block heights, which remain display-only and unbounded; see L-02.
 
 ### S-02 — Terminal escape injection from server text (fixed)
 
@@ -88,8 +100,9 @@ as clipboard access. No key material was exposed.
 
 **Fix:** transaction txids are parsed as `bitcoin::Txid` and invalid entries are skipped. Error bodies
 and unexpected broadcast responses are passed through `safe_text`, which strips control characters
-and invisible Unicode format characters (bidi overrides, zero-width, BOM) and bounds length. A
-regression test checks the sanitiser and `parse_utxo` validation.
+and a specific list of invisible Unicode format characters (bidi overrides, zero-width, BOM) and
+bounds length. The list is not exhaustive; L-03 records remaining invisible and line-breaking
+characters. A regression test checks the sanitiser and `parse_utxo` validation.
 
 ### S-03 — Memory amplification from API responses (fixed)
 
@@ -167,7 +180,7 @@ by the provider, which cannot receive keys or change what a response means.
 ### S-11 — Mainnet selection is an accident guard (accepted)
 
 Mainnet is chosen when creating or importing a wallet, while testnet remains the default. That
-choice shows a short notice that Cairn is experimental and unaudited, then asks for a default-no
+choice shows a short notice that Cairn is experimental and not third-party audited, then asks for a default-no
 confirmation. Opening a wallet uses its recorded network without another prompt. The UI does not
 claim safety, and mainnet spends still go through the normal review screens. This prevents accidental
 chain selection, not a compromised account. This is documented in `SECURITY.md`.
@@ -232,8 +245,10 @@ Accepted, not changed:
 - **H-01 (Medium, fixed) — fee ceiling.** `send::plan` now rejects a fee above 10% of the recipient
   amount (with a 10,000-sat floor for ordinary small sends) or above 1,000,000 sats absolute. Server
   estimates and manual entry were already clamped to 1..=1000 sat/vB; this adds the missing hard
-  stop and bounds what a malicious estimate can burn. The same ceiling is enforced by the offline
-  PSBT verifier and by `--broadcast`.
+  stop and bounds what a malicious estimate can burn. The offline PSBT verifier applies the same
+  ceiling to non-wallet outputs. `--broadcast` currently applies it to all outputs, including change,
+  so it is looser than the offline verifier for a PSBT signed elsewhere; that mismatch is open as
+  L-01.
 - **H-02 (Low, fixed) — prevout cross-check.** Before review, the online side re-fetches each
   selected coin's creating transaction and compares the output's value and address with the UTXO
   endpoint. A mismatch, missing output or unconfirmed status fails closed. Verification is capped at
@@ -250,7 +265,7 @@ Accepted, not changed:
 
 An external AI reviewer produced `audit.txt` against code commit `5c96ea2`. It had no Rust toolchain,
 so it read the source and ran Python PoCs but could not execute this test suite or the fuzzers. This
-was an AI-assisted review, not an independent audit. Triage:
+was an AI-assisted review, not a third-party audit. Triage:
 
 - **BLOCK-01 (High, fixed) — IPv6 same-host redirect bypass.** `url_parts` split an authority at the
   first `:`, so `[2001:db8::1]` became `[2001`; two different IPv6 hosts could compare equal. The
@@ -291,22 +306,22 @@ was an AI-assisted review, not an independent audit. Triage:
   ANSI spoofing requires write access to the user's wallet directory (same-user, out of scope).
 - **INF-12 (Info, clean).** The reviewer's RustSec cross-check found no affected locked dependency.
 
-The fixes are committed in `1e87e5d`; later review fixes are committed in `41dd624`. A second
+The fixes from that review are committed in `1e87e5d`; later review fixes are in `41dd624`. A second
 source-only AI-assisted review at `1e87e5d` found no blocking issue and re-confirmed the fixes and
 accepted residuals. It also lacked a Rust toolchain and saw no tag or earlier commits in its snapshot.
 The full history is on `master`. The old `audit-2026-11-08` tag was removed because it pointed at the
 stale `704bee7` package commit; no tag currently represents an audit.
 
-## Latest external AI-assisted review triage (2026-11-08)
+## Second external AI-assisted review triage (2026-11-08)
 
 A further source-only AI review of `1e87e5d` found no Critical/High code issue and one process
-problem. It was not an independent audit, and its snapshot again lacked tags/history. Findings:
+problem. It was not a third-party audit, and its snapshot again lacked tags/history. Findings:
 
 - **AUD-01 (Medium, process, partially addressed) — reproducibility.** The review snapshot did not
-  identify the tree it examined, and the old package tag was stale. `AUDIT-PACKAGE.md` now pins
-  `41dd624` / tree `4a89ef9c6dccdabbd934c83118926027ebc84a5c` and includes the latest fixes. The
-  stale tag was removed. A new tag should only be created for the independent-audit package; this
-  is not a code vulnerability, but an independent audit is still required.
+  identify the tree it examined, and the old package tag was stale. At that time the package was
+  re-pinned to `41dd624` / tree `4a89ef9c6dccdabbd934c83118926027ebc84a5c`; it now pins `b620147` /
+  tree `f2b391da…`. The stale tag was removed. A new tag should only be created for the third-party
+  audit package; this is not a code vulnerability, but a third-party audit is still required.
 - **AUD-02 (Low, fixed) — testnet chain confusion.** The guard accepted any testnet name for any
   testnet, so a Testnet4 wallet could follow a same-host redirect to `testnet`/`signet`. Each testnet
   now requires its own segment (`testnet4`; `testnet`/`testnet3`; `signet`), and chain names in the
@@ -331,8 +346,86 @@ problem. It was not an independent audit, and its snapshot again lacked tags/his
   wallet with activity beyond that window needs a wider scan; this must be addressed before mainnet.
 - **AUD-11 (Info, fixed).** `Opened::drop` now zeroizes the mnemonic before releasing its `mlock`.
 
-The latest fixes are committed in `41dd624`; no audit tag is published. Pin that commit and tree
-hash for the next review, and create a new tag only when the independent audit is engaged.
+The fixes at the time of that review were committed in `41dd624`; later code is in `a645b5f` and
+`b620147`. No audit tag is published. `AUDIT-PACKAGE.md` now pins `b620147` and its tree hash; create
+a release tag only for the commit actually shipped, and a separate audit tag only when a third-party
+audit is engaged.
+
+## Independent AI-assisted source review (2026-11-08, `b620147`)
+
+An independent AI-assisted reviewer read the source, fuzz targets, CI, installer and project review
+documents at `b620147` and ran the project's fmt, clippy, test and audit gates. It treated
+`SECURITY-REVIEW.md` as claims to verify. This was a source review plus build/test verification, not
+a third-party human audit, and it does not satisfy the exit criteria in `AUDIT-PACKAGE.md`.
+
+**Verdict:** no Critical or High severity code vulnerability was found, and no path was found for a
+malicious Esplora server, PSBT or QR image to extract the seed or forge a signature under the
+documented threat model. The signing, keystore and URL-guard designs held up. The serious problems
+were provenance and the post-baseline mainnet safety regression.
+
+| ID | Severity | Area | Status |
+|---|---|---|---|
+| M-01 | Medium | Audit package pinned a stale commit / false tree description | Fixed in this documentation update |
+| M-02 | Medium | Mainnet opt-in and per-session confirmation removed after review | Open — deliberate, now in scope |
+| L-01 | Low | `--broadcast` fee ceiling weaker than the offline verifier and docs | Open |
+| L-02 | Low | History amounts and block heights not bounded | Open |
+| L-03 | Low | Unicode sanitiser is a denylist; some invisible/line-breaking chars pass | Open |
+| L-04 | Low | No PSBT output cap; review screen can be flooded | Open |
+| L-05 | Low | Concurrent wallet creation can silently replace a wallet | Open |
+| I-01 | Info | Leftover `Mainnet` config blocks testnet wallets after upgrade | Open |
+| I-02 | Info | Installer/release still unsigned | Open — stated unmet criterion |
+
+- **M-01 (Medium, documentation fixed).** `AUDIT-PACKAGE.md` had pinned `41dd624` / tree
+  `4a89ef9c…` and still said the mainnet-selection changes were uncommitted. The actual review target
+  was `b620147` / tree `f2b391da…` with a clean tree, after `a645b5f` and `b620147`. The package now
+  pins the actual release commit and folds those changes into scope. The earlier pin did not describe
+  the code being shipped.
+- **M-02 (Medium, open).** `a645b5f` removed `network::enabled()`, `require_enabled()`,
+  `require_supported()`, the `--enable-mainnet` marker and the per-session typed `MAINNET`
+  confirmation, and dropped guards from `unlock_wallet_with` and `offline::broadcast`. Mainnet is now
+  confirmed only when creating or importing a wallet. Opening an existing mainnet wallet, creating a
+  mainnet PSBT, signing it offline and broadcasting it require no network confirmation. The keystore
+  AAD still binds the network and `net_for` still binds mainnet wallets to the mainnet API, so this is
+  not chain confusion, but it is a weaker accident guard for an experimental wallet. This change is
+  deliberate and is now explicitly in the audit scope; it has not been remediated.
+- **L-01 (Low, open).** `send::check_fee` means 10% of the recipient amount, a 10,000-sat floor and a
+  1,000,000-sat cap. `verify_psbt` passes non-wallet outputs; `--broadcast` passes all outputs,
+  including change. A 100M-sat input with a 1M-sat payment, 98.1M change and 900k fee is rejected by
+  the offline verifier but accepted by `--broadcast`. The H-01 "same ceiling" claim above was wrong
+  and is corrected here. The absolute cap still applies.
+- **L-02 (Low, open).** `esplora::transactions` accepts transaction-history `value` fields with
+  `as_i64().unwrap_or(0)` and saturating arithmetic, and accepts any `u64` block height. A malicious
+  provider can display an impossible history amount or height. UTXO, input, output and balance
+  amounts remain bounded; this is a display-only history gap.
+- **L-03 (Low, open).** `safe_text` strips control characters and a specific format-character list but
+  not `U+2028`/`U+2029`, Unicode tag characters, variation selectors or `U+180E`. These can be
+  invisible or break lines in some terminals. Exposure is limited to HTTP error bodies and the
+  broadcast-ID mismatch note; txids are parsed as `Txid` before display.
+- **L-04 (Low, open).** `show_psbt_review` prints every non-wallet output with no cap, and neither
+  `psbt_guard::check_structure` nor `verify_psbt` caps input/output counts. Within the 5 MB PSBT cap
+  and 1M-sat fee cap, a crafted PSBT can print tens of thousands of lines and bury the real
+  destination. The user still has to type `SEND`, but the review is less effective.
+- **L-05 (Low, open).** `keystore::save_with` checks `path.exists()`, writes a temp file and calls
+  `fs::rename`; on Unix the rename replaces an existing destination. Two concurrent creations with
+  the same name can silently replace each other. The seed is still on paper, so funds are recoverable,
+  but the race should be closed with a no-replace operation or a post-rename check.
+- **I-01 (Info, open).** `load_config` still accepts `"Mainnet"`, which older versions could write.
+  Settings now offers only testnets, so an upgraded user with that config gets a mainnet/testnet
+  mismatch error for every testnet wallet until they change Settings. It is recoverable but should be
+  migrated or ignored.
+- **I-02 (Info, open).** Release artifacts have SHA-256 checksums but no signature, and the installer
+  trusts GitHub over TLS. This remains an unmet release criterion, not a hidden claim.
+
+What the independent review verified as holding up: the v2 keystore AAD and KDF bounds; BIP39/BIP84
+vectors; both signing paths' fingerprint, path, script and `SIGHASH_ALL` checks; RFC6979; the offline
+verify-then-sign flow; change classification and BIP143 value binding; the `mlock`/zeroize claim for
+`bip39` 2.2.2; HTTPS-only networking with disabled automatic redirects and same-origin manual
+redirects; response, request, prevout and UTXO bounds; and process hardening. It found no
+`unwrap`/`expect` on untrusted data in production code.
+
+The review's own bottom line: the cryptography and transaction logic are in good shape, but the
+provenance problem and the post-review mainnet change must be resolved before an honest third-party
+audit. This record keeps the project's "not a third-party audit" status explicit.
 
 ## Fuzzing harness (2026-11-08)
 
@@ -368,18 +461,18 @@ pure adapter before it can be fuzzed through the library.
   signature.
 - Offline `--broadcast` compares the signed PSBT's unsigned transaction and input metadata with the
   original unsigned file, and the offline review classifies change against the wallet's scripts.
-- Mainnet is explicit: testnet is the default, selection uses a default-no confirmation,
-  chain-aware `net_for` binds wallets to the matching API, and the URL guard rejects cross-chain
-  endpoints.
+- Mainnet is explicit at creation/import: testnet is the default, selection uses a default-no
+  confirmation, chain-aware `net_for` binds wallets to the matching API, and the URL guard rejects
+  cross-chain endpoints. There is no per-session re-confirmation after opening a wallet (M-02).
 - `cargo audit` is clean and the dependency set is small.
 
 ## Residual risk and release recommendation
 
-This review does not replace an independent audit. Before mainnet is recommended or described as
+These reviews do not replace a third-party audit. Before mainnet is recommended or described as
 safe, the project still needs at least:
 
-1. An independent third-party audit of keystore, derivation, signing, PSBT and network paths, with
-   remediation of findings.
+1. A third-party audit of keystore, derivation, signing, PSBT and network paths, with remediation of
+   findings. The independent AI-assisted review does not satisfy this.
 2. Fuzzing of PSBT, QR frame, image and JSON parsers.
 3. Live integration tests against each supported Esplora provider and testnet, plus a mainnet
    dry-run plan that does not risk funds.
@@ -388,5 +481,5 @@ safe, the project still needs at least:
 5. A review of `mlock` failure behavior (locking is best effort) and further local-file DoS limits;
    cross-host redirects, the fee ceiling, prevout checks and the KDF upper bound are now addressed.
 
-Until then: keep testnet as the default, keep mainnet explicit and clearly labelled unaudited, and
-do not use Cairn for meaningful real funds.
+Until then: keep testnet as the default, keep mainnet explicit, describe it as independently
+source-reviewed but not third-party audited, and do not use Cairn for meaningful real funds.

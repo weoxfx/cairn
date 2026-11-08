@@ -3,10 +3,10 @@
 An open-source Bitcoin wallet for the command line, built around an encrypted keystore, a
 watch-only session and careful sending.
 
-> **EXPERIMENTAL. UNAUDITED. TESTNET BY DEFAULT.**
-> Mainnet is chosen when creating or importing a wallet, after a one-time confirmation. It is still
-> experimental and nobody independent has reviewed this code; do not use real funds you cannot
-> afford to lose.
+> **EXPERIMENTAL. INDEPENDENT SOURCE REVIEW COMPLETED. NOT A THIRD-PARTY AUDIT. TESTNET BY DEFAULT.**
+> An independent AI-assisted source review of commit `b620147` found no Critical or High code
+> vulnerability under its documented threat model. It is not a professional third-party audit.
+> Mainnet remains experimental; do not use real funds you cannot afford to lose.
 
 ## What it does today
 
@@ -18,19 +18,20 @@ watch-only session and careful sending.
 - Offline signing (file or QR transport): build an unsigned PSBT online, sign it on a
   machine with no network, then broadcast it after the online side verifies it
 - Works on Testnet4, Testnet3 and Signet, with provider failover and request pacing
-- Mainnet can be selected from the network menu; testnet remains the default
+- Mainnet can be chosen when creating or importing a wallet; testnet remains the default
 - Runs on Linux, macOS and Android (Termux)
 
 ## Mainnet
 
 Cairn is built and tested testnet-first, and testnet remains the default. Mainnet is chosen when
 creating or importing a wallet, without any extra setup. That choice shows a short
-experimental/unaudited notice and asks for confirmation. Opening an existing wallet uses its
+not-third-party-audited notice and asks for confirmation. Opening an existing wallet uses its
 recorded network without another prompt.
 
-Mainnet is **not audited** and must not be treated as safe for real savings. New wallets record
-their network, and the API layer refuses a testnet wallet pointed at a mainnet server (and the
-reverse). Use testnet, or a hardware/reviewed wallet, for anything you cannot afford to lose.
+Mainnet has completed an independent AI-assisted source review but has **not** had a third-party
+audit, and must not be treated as safe for real savings. New wallets record their network, and the
+API layer refuses a testnet wallet pointed at a mainnet server (and the reverse). Use testnet, or a
+hardware/reviewed wallet, for anything you cannot afford to lose.
 
 ## Security design
 
@@ -41,14 +42,15 @@ reverse). Use testnet, or a hardware/reviewed wallet, for anything you cannot af
 | Memory | After unlock only the public account key (xpub) is kept. The decrypted mnemonic and signing keys are held in `mlock`ed allocations when the OS allows it, and erased on drop. Spending keys exist only for the moment of signing |
 | Sending | Re-asks the password, checks the keys match the wallet and each coin, re-fetches each spent coin's creating transaction to compare value/address, checks that the amounts add up, enforces a fee ceiling (10% of the amount, 10k-sat floor, 1M-sat hard cap), uses deterministic (RFC6979) signatures |
 | Offline | `--offline` never opens a socket. It checks that every input belongs to the wallet, has the expected network-specific BIP84 path and script, that change is ours and that the fee clears the relay minimum. PSBT files must be regular files (no FIFOs or symlinks) and signed output is written atomically at mode 600. The online side refuses a signed PSBT that changed any input or output. QR frames are checksummed and then go through the same checks; they are public data, not encrypted |
-| Network | HTTPS-only with certificate checks; redirects are same-origin (host and port) and re-checked, broadcasts refuse them. Response size caps fail closed, with rate pacing, failover and a chain-specific URL guard; userinfo and IPv6 authorities are rejected. Server data is treated as untrusted; amounts and balances bounded, txids validated, control characters and invisible Unicode format characters stripped |
-| Mainnet | Chosen when creating or importing a wallet; testnet remains the default. The choice shows a short experimental/unaudited notice and a default-no confirmation. This is an accident guard, not an audit |
+| Network | HTTPS-only with certificate checks; redirects are same-origin (host and port) and re-checked, broadcasts refuse them. Response size caps fail closed, with rate pacing, failover and a chain-specific URL guard; userinfo and IPv6 authorities are rejected. Server data is treated as untrusted; UTXO/input/output and balance amounts are bounded, txids are validated, and control characters plus a specific list of invisible Unicode format characters are stripped. History net amounts and heights are display-only and not bounded (L-02); the sanitiser list is not exhaustive (L-03) |
+| Mainnet | Chosen when creating or importing a wallet; testnet remains the default. The choice shows a short not-third-party-audited notice and a default-no confirmation. Opening an existing wallet does not ask again. This is an accident guard, not a third-party audit |
 | Process | No core dumps, umask 077, 5-minute idle lock; non-dumpable on Linux/Android |
 
 Cryptographic primitives come from audited libraries (rust-bitcoin, libsecp256k1, RustCrypto).
 Cairn does not implement its own cryptography. See [SECURITY.md](SECURITY.md) for the threat model,
-known limits and how to report a vulnerability. An internal review is documented in
-[SECURITY-REVIEW.md](SECURITY-REVIEW.md); it is not a substitute for an independent audit.
+known limits and how to report a vulnerability. Internal and independent AI-assisted reviews are
+documented in [SECURITY-REVIEW.md](SECURITY-REVIEW.md); neither is a substitute for a third-party
+audit.
 
 ## Install
 
@@ -213,11 +215,12 @@ Intel, attaches SHA-256 checksums and creates a GitHub Release.
 - [x] Send with review and confirmation
 - [x] Provider failover and rate pacing
 - [x] Offline signer with PSBT and QR transfer (PSBT files and QR images; live camera optional)
-- [x] Experimental, unaudited mainnet support
+- [x] Experimental mainnet support (independently source-reviewed; no third-party audit)
 - [ ] Optional passphrase (25th word), 2-of-3 multisig
 - [ ] Own-node support (Electrum protocol), Tor
 - [x] Fuzzing harness for URL/redirect, QR frames and PSBT (keystore pending)
-- [ ] Reproducible builds and independent audit (required before recommending mainnet)
+- [x] Independent AI-assisted source review (not a third-party audit)
+- [ ] Reproducible builds and third-party audit (required before recommending mainnet)
 
 ## License
 
