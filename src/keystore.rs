@@ -62,9 +62,13 @@ pub struct Keystore {
 
 /// A successfully decrypted wallet. The mnemonic and passphrase live in locked
 /// allocations (best effort) and are zeroized on drop.
+///
+/// Fields are crate-private on purpose: this value is the proof that a wallet
+/// file was authenticated with its password, so it must not be constructible
+/// from a bare mnemonic outside this module. `Signer::from_opened` relies on it.
 pub struct Opened {
-    pub mnemonic: Box<Mnemonic>,
-    pub passphrase: Zeroizing<String>,
+    pub(crate) mnemonic: Box<Mnemonic>,
+    pub(crate) passphrase: Zeroizing<String>,
     pub fingerprint: String,
     pub network: Network,
 }
@@ -143,7 +147,7 @@ fn aad_v3(
 }
 
 /// A tampered wallet file must not be able to weaken the KDF or exhaust memory.
-fn validate_params(p: &KdfParams) -> Result<(), String> {
+pub fn validate_params(p: &KdfParams) -> Result<(), String> {
     // Upper bounds are deliberately tight: a tampered file cannot make us burn
     // gigabytes of memory or minutes of CPU before authentication fails. New
     // wallets use 128 MiB / 3 passes, well inside the accepted window.
@@ -383,6 +387,51 @@ fn read_wallet_file(path: &Path) -> Result<Vec<u8>, String> {
         return Err("wallet file is unexpectedly large".into());
     }
     Ok(data)
+}
+
+/// Public (non-secret) properties of a wallet file, for `cairn security check`.
+/// Nothing here decrypts the wallet or exposes key material; the recorded values
+/// are exactly the header fields an attacker or a damaged disk could change.
+pub struct FileInfo {
+    pub version: u32,
+    pub kdf: String,
+    pub kdf_params: KdfParams,
+    pub passphrase: bool,
+    pub fingerprint: String,
+    pub network: String,
+    pub size: u64,
+    /// Mode bits observed *before* [`read_wallet_file`] tightens them to 0600.
+    pub mode: u32,
+    pub dir_mode: u32,
+}
+
+pub fn inspect(name: &str) -> Result<FileInfo, String> {
+    let path = wallet_path(name)?;
+    // Read the permissions first: read_wallet_file silently repairs a file that
+    // is group/world readable, and that repair must still be reported.
+    let before = fs::symlink_metadata(&path).map_err(|e| format!("cannot read wallet: {e}"))?;
+    if !before.is_file() {
+        return Err("wallet path is not a regular file".into());
+    }
+    let dir_mode = path
+        .parent()
+        .and_then(|d| fs::symlink_metadata(d).ok())
+        .map(|m| m.permissions().mode() & 0o777)
+        .unwrap_or(0);
+    let data = read_wallet_file(&path)?;
+    let ks: Keystore =
+        serde_json::from_slice(&data).map_err(|_| "corrupt wallet file".to_string())?;
+    Ok(FileInfo {
+        version: ks.version,
+        kdf: ks.kdf,
+        kdf_params: ks.kdf_params,
+        passphrase: ks.passphrase,
+        fingerprint: ks.fingerprint,
+        network: ks.network,
+        size: data.len() as u64,
+        mode: before.permissions().mode() & 0o777,
+        dir_mode,
+    })
 }
 
 /// Whether opening this wallet will require a BIP39 passphrase. This reads only

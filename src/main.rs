@@ -6,6 +6,7 @@ mod network;
 mod offline;
 mod psbt_guard;
 mod qr;
+mod security;
 mod send;
 mod ui;
 mod wallet;
@@ -16,7 +17,10 @@ use console::style;
 use dialoguer::{Confirm, Input, Password};
 use qrcode::{render::unicode, QrCode};
 use std::time::{Duration, Instant};
-use ui::{banner, card, clear, fail, fmt_btc, hint, menu, ok, pause, section, short, spin, theme};
+use ui::{
+    banner, card, clear, fail, fmt_btc, fmt_sats, hint, menu, ok, pause, section, short, spin,
+    theme,
+};
 use wallet::Watch;
 use zeroize::Zeroizing;
 
@@ -71,6 +75,13 @@ fn run() -> Result<(), String> {
             }
             label_tx(&args[1], &args[2..].join(" "), json)
         }
+        "security" => {
+            if args.get(1).map(|a| a.as_str()) != Some("check") {
+                return Err("usage: cairn security check [WALLET] [--json]".into());
+            }
+            security_check(&args[2..], json)
+        }
+        "--security-check" => security_check(&args[1..], json),
         "--create-psbt" => {
             let (pos, out) = parse_args(&args[1..])?;
             if pos.len() > 1 {
@@ -126,6 +137,16 @@ fn parse_args(args: &[String]) -> Result<(Vec<String>, Option<String>), String> 
         i += 1;
     }
     Ok((pos, out))
+}
+
+/// `cairn security check` — report what this build can and cannot verify.
+fn security_check(args: &[String], json: bool) -> Result<(), String> {
+    let (pos, out) = parse_args(args)?;
+    if out.is_some() || pos.len() > 1 {
+        return Err("usage: cairn security check [WALLET] [--json]".into());
+    }
+    let name = choose_wallet(pos.first().map(|s| s.as_str()))?;
+    security::check(&name, json)
 }
 
 fn version(json: bool) -> Result<(), String> {
@@ -267,6 +288,8 @@ Usage:
   cairn --descriptor [WALLET] [--json]       Export BIP84 watch-only descriptors
   cairn --seedqr [WALLET]                    Show a numeric SeedQR (reveals seed)
   cairn --label <TXID> <LABEL> [--json]      Store a BIP329 transaction label
+  cairn security check [WALLET] [--json]     Report what this build can verify
+  cairn --security-check [WALLET] [--json]   Same as `security check`
   cairn --version [--json]                   Show the version
   cairn --help                               Show this help
 
@@ -286,13 +309,60 @@ Network:
 
 fn interactive() -> Result<(), String> {
     loop {
+        ui::set_context("Home");
         banner();
+        match keystore::list_wallets() {
+            Ok(list) if !list.is_empty() => {
+                section("Wallets");
+                println!();
+                // Public header fields only: no password, no key material.
+                let rows: Vec<Vec<String>> = list
+                    .iter()
+                    .take(6)
+                    .map(|n| {
+                        let info = keystore::inspect(n).ok();
+                        let net = info.as_ref().map(|i| i.network.clone()).unwrap_or_default();
+                        let fp = info
+                            .as_ref()
+                            .map(|i| i.fingerprint.clone())
+                            .unwrap_or_default();
+                        vec![
+                            style(n).bold().to_string(),
+                            style(net).dim().to_string(),
+                            style(fp).cyan().dim().to_string(),
+                        ]
+                    })
+                    .collect();
+                ui::table(
+                    &["Wallet", "Network", "Fingerprint"],
+                    &rows,
+                    &[false, false, false],
+                );
+                if list.len() > 6 {
+                    println!();
+                    hint(&format!("and {} more", list.len() - 6));
+                }
+            }
+            _ => {
+                card(
+                    "Getting started",
+                    &[
+                        style("No wallets yet — create one or import a seed phrase.")
+                            .dim()
+                            .to_string(),
+                    ],
+                );
+            }
+        }
+        println!();
+        hint("The seed is stored encrypted and only decrypted while signing.");
+        println!();
         let choice = menu(&[
-            "Create New Wallet",
-            "Open Existing Wallet",
-            "Import Wallet (seed phrase)",
-            "Settings",
-            "Exit",
+            "＋  Create a new wallet",
+            "◇  Open existing wallet",
+            "⇩  Import seed phrase",
+            "⚙  Settings",
+            "⏻  Exit",
         ])
         .unwrap_or(4);
         let result = match choice {
@@ -659,56 +729,45 @@ fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
         Err(e) => last_err = Some(e),
     }
     loop {
+        ui::set_context(format!("{name}  ·  {fp}"));
         banner();
-        ui::kv("Wallet", &style(name).bold().to_string());
-        ui::kv("Fingerprint", fp);
-        println!();
+        let unit = network::unit(watch.network());
         match &state {
             Some(s) => {
-                let mut lines = vec![style(format!(
-                    "{} {}",
-                    fmt_btc(s.confirmed),
-                    network::unit(watch.network())
-                ))
-                .green()
-                .bold()
-                .to_string()];
+                let mut lines = vec![
+                    format!(
+                        "{}  {}",
+                        style(fmt_btc(s.confirmed)).cyan().bold(),
+                        style(unit).dim()
+                    ),
+                    style(format!("{} sats", fmt_sats(s.confirmed)))
+                        .dim()
+                        .to_string(),
+                ];
                 if s.unconfirmed != 0 {
                     lines.push(
-                        style(format!("{} pending", fmt_btc(s.unconfirmed)))
+                        style(format!("{} {} pending", fmt_btc(s.unconfirmed), unit))
                             .yellow()
-                            .to_string(),
-                    );
-                }
-                lines.push(
-                    style(format!(
-                        "{} addresses used  ·  next receive #{}",
-                        s.used.len(),
-                        s.next_receive
-                    ))
-                    .dim()
-                    .to_string(),
-                );
-                if let Some(t) = synced_at {
-                    lines.push(
-                        style(format!("Updated {}s ago", t.elapsed().as_secs()))
-                            .dim()
-                            .to_string(),
-                    );
-                }
-                if last_err.is_some() {
-                    lines.push(
-                        style("Connection issue — showing the last known balance")
-                            .yellow()
+                            .bold()
                             .to_string(),
                     );
                 }
                 card("Balance", &lines);
+                println!();
+                let updated = synced_at
+                    .map(|t| format!("{}s ago", t.elapsed().as_secs()))
+                    .unwrap_or_else(|| "just now".into());
+                ui::grid(&[
+                    ("Addresses", &format!("{} used", s.used.len())),
+                    ("Next receive", &format!("#{}", s.next_receive)),
+                    ("Change", &format!("#{}", s.next_change)),
+                    ("Updated", &updated),
+                ]);
             }
             None => card(
                 "Balance",
                 &[
-                    style("Not synced").yellow().to_string(),
+                    style("Not synced").yellow().bold().to_string(),
                     style("Choose Refresh to load your balance.")
                         .dim()
                         .to_string(),
@@ -716,22 +775,26 @@ fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
             ),
         }
         if let Some(p) = esplora::proxy_desc() {
-            ui::info(&format!("proxy: {p}"));
+            println!();
+            ui::info(&format!("Tor/proxy {p}"));
         }
         if let Some(e) = &last_err {
+            println!();
             ui::warn(e);
+            hint("Showing the last known balance.");
         }
         println!();
         let asked = Instant::now();
         let choice = menu(&[
-            "Send bitcoin",
-            "Receive",
-            "Transactions",
-            "Refresh",
-            "Wallet information",
-            "Lock and exit",
+            "↑  Send bitcoin",
+            "↓  Receive",
+            "☰  Transactions",
+            "⟳  Refresh",
+            "ⓘ  Wallet information",
+            "⛨  Security check",
+            "⏻  Lock and exit",
         ])
-        .unwrap_or(5);
+        .unwrap_or(6);
         if asked.elapsed() > IDLE_LOCK {
             banner();
             fail("Locked after 5 minutes of inactivity. Open the wallet again.");
@@ -781,6 +844,15 @@ fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
                 }
             }
             4 => info_screen(fp, watch)?,
+            5 => {
+                // Re-authenticates: proving the ciphertext still decrypts is the
+                // point of the integrity check, so the password is asked again.
+                if let Err(e) = security::check(name, false) {
+                    println!();
+                    fail(&e);
+                }
+                pause();
+            }
             _ => return Ok(()),
         }
     }
@@ -790,12 +862,11 @@ fn receive_screen(watch: &Watch, state: Option<&esplora::WalletState>) -> Result
     let network = watch.network();
     let mut index = state.map(|s| s.next_receive).unwrap_or(0);
     loop {
+        ui::set_context(format!("Receive  ·  {}", network::label(network)));
         banner();
         let addr = watch.address_at(0, index)?;
-        section(&format!("Receive · {}", network::label(network)));
-        println!();
         card(
-            "Address",
+            "Receiving address",
             &[
                 style(&addr).cyan().bold().to_string(),
                 style(wallet::derivation_path(network, 0, index))
@@ -804,12 +875,12 @@ fn receive_screen(watch: &Watch, state: Option<&esplora::WalletState>) -> Result
             ],
         );
         println!();
-        hint("Use a new address for each payment and verify it before sharing.");
+        hint("Use a fresh address for every payment and verify it before sharing.");
         if state.is_none() {
-            hint("Not synced yet: this address may already have been used.");
+            ui::warn("Not synced yet: this address may already have been used.");
         }
         println!();
-        match menu(&["Show QR code", "New address", "Back"])? {
+        match menu(&["⊞  Show QR code", "＋  New address", "←  Back"])? {
             0 => show_qr(&addr)?,
             1 => index += 1,
             _ => return Ok(()),
@@ -870,31 +941,50 @@ fn transactions_screen(
         return Ok(());
     }
     let mut labels = labels::Labels::load().unwrap_or_else(|_| labels::Labels::empty());
-    for t in txs.iter().take(15) {
-        let (icon, amount) = if t.net >= 0 {
-            (
-                style("↓").green().bold(),
-                style(format!("{:<16}", format!("+{}", fmt_btc(t.net))))
-                    .green()
-                    .bold(),
-            )
-        } else {
-            (
-                style("↑").red().bold(),
-                style(format!("{:<16}", fmt_btc(t.net))).red().bold(),
-            )
-        };
-        let status = match t.height {
-            Some(h) => style(format!("confirmed · {h}")).dim(),
-            None => style("pending".to_string()).yellow(),
-        };
-        let label = labels
-            .get(&t.txid)
-            .map(|l| format!("  {}", style(l).magenta()))
-            .unwrap_or_default();
-        println!("  {} {} {}{}", icon, amount, status, label);
-        println!("    {}\n", style(short(&t.txid)).dim());
-    }
+    let unit = network::unit(network);
+    let rows: Vec<Vec<String>> = txs
+        .iter()
+        .take(15)
+        .map(|t| {
+            let (dir, amount) = if t.net >= 0 {
+                (
+                    style("↓ in").green().bold().to_string(),
+                    style(format!("+{}", fmt_btc(t.net)))
+                        .green()
+                        .bold()
+                        .to_string(),
+                )
+            } else {
+                (
+                    style("↑ out").red().bold().to_string(),
+                    style(fmt_btc(t.net)).red().bold().to_string(),
+                )
+            };
+            let status = match t.height {
+                Some(h) => style(format!("confirmed {h}")).dim().to_string(),
+                None => style("pending".to_string()).yellow().to_string(),
+            };
+            let label = labels.get(&t.txid).unwrap_or("").to_string();
+            vec![
+                dir,
+                amount,
+                status,
+                label,
+                style(short(&t.txid)).dim().to_string(),
+            ]
+        })
+        .collect();
+    ui::table(
+        &["Type", "Amount", "Status", "Label", "Txid"],
+        &rows,
+        &[false, true, false, false, false],
+    );
+    println!();
+    hint(&format!(
+        "Amounts in {unit} · the {} most recent transactions",
+        rows.len()
+    ));
+    println!();
 
     // BIP329 labels are local-only metadata; they are never sent to a server.
     let mut items: Vec<String> = txs
@@ -932,25 +1022,43 @@ fn transactions_screen(
 
 fn info_screen(fp: &str, watch: &Watch) -> Result<(), String> {
     let net = esplora::net_for(watch.network())?;
+    ui::set_context(format!("Wallet information  ·  {fp}"));
     banner();
-    section("Wallet information");
-    println!();
-    ui::kv("Fingerprint", fp);
-    ui::kv("Address type", "Native SegWit (BIP84)");
-    ui::kv(
-        "Network",
-        &format!(
-            "{} (wallet: {})",
-            net.label(),
-            network::label(watch.network())
+    let identity = vec![
+        format!(
+            "{:<12}{}",
+            style("Fingerprint").dim(),
+            style(fp).cyan().to_string()
         ),
-    );
+        format!(
+            "{:<12}{}",
+            style("Network").dim(),
+            format!(
+                "{} (wallet: {})",
+                net.label(),
+                network::label(watch.network())
+            )
+        ),
+        format!(
+            "{:<12}{}",
+            style("Script type").dim(),
+            "Native SegWit · BIP84"
+        ),
+        format!(
+            "{:<12}{}",
+            style("Keys").dim(),
+            "watch-only session (seed wiped after unlock)"
+        ),
+    ];
+    card("Identity", &identity);
+    println!();
+    section("Connection");
+    println!();
     ui::kv("API servers", &esplora::providers_desc(net));
     ui::kv(
         "Proxy",
         &esplora::proxy_desc().unwrap_or_else(|| "off (direct connection)".into()),
     );
-    ui::kv("Keys", "watch-only session (seed wiped after unlock)");
     ui::kv("Idle lock", "5 minutes");
     println!();
     section("Account xpub");
@@ -970,8 +1078,9 @@ fn info_screen(fp: &str, watch: &Watch) -> Result<(), String> {
 
 fn settings() -> Result<(), String> {
     loop {
+        ui::set_context("Settings");
         banner();
-        section("Settings");
+        section("Network");
         println!();
         let current = esplora::net();
         ui::kv("Default network", "Mainnet");

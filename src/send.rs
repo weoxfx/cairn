@@ -3,7 +3,7 @@
 
 use crate::esplora::{self, Utxo, WalletState};
 use crate::network;
-use crate::ui::{banner, boxed, fmt_btc, menu, ok, pause, section, short, spin, theme};
+use crate::ui::{banner, fmt_btc, menu, ok, pause, short, spin, theme};
 use crate::wallet::{derivation_path, Signer, Watch};
 use bitcoin::absolute::LockTime;
 use bitcoin::address::NetworkUnchecked;
@@ -382,50 +382,58 @@ fn pct(fee: u64, amount: u64) -> f64 {
 /// by offline PSBT creation (which uses the same [`Plan`]).
 pub fn review(p: &Plan, network: Network) {
     let unit = network::unit(network);
+    crate::ui::set_context(format!("Send  ·  review  ·  {}", network::label(network)));
     banner();
-    section("Review transaction");
+    crate::ui::card(
+        "Recipient",
+        &[style(p.to.to_string()).cyan().bold().to_string()],
+    );
     println!();
-    println!("  {}", style("To").dim());
-    println!("  {}\n", style(p.to.to_string()).cyan().bold());
-    let mut lines = vec![
-        format!(
-            "{:<8}{} {unit}",
-            "Amount",
-            style(fmt_btc(p.amount as i64)).bold()
-        ),
-        format!("{:<8}{} {unit}", "Fee", fmt_btc(p.fee as i64)),
-        format!("{:<8}{:.1} sat/vB, {} coin(s)", "", p.rate, p.inputs.len()),
-    ];
+    let mut lines = vec![format!(
+        "{:<12}{} {}",
+        style("Amount").dim(),
+        style(fmt_btc(p.amount as i64)).bold(),
+        style(unit).dim()
+    )];
     if let Some((_, v)) = &p.change {
         lines.push(format!(
-            "{:<8}{} {unit} (back to you)",
-            "Change",
-            fmt_btc(*v as i64)
+            "{:<12}{} {}",
+            style("Change").dim(),
+            fmt_btc(*v as i64),
+            style(unit).dim()
         ));
     } else {
-        lines.push(format!("{:<8}none", "Change"));
+        lines.push(format!(
+            "{:<12}{}",
+            style("Change").dim(),
+            style("none").dim()
+        ));
     }
     lines.push(format!(
-        "{:<8}{} {unit}",
-        "Total",
-        style(fmt_btc((p.amount + p.fee) as i64)).yellow().bold()
+        "{:<12}{} {}",
+        style("Fee").dim(),
+        fmt_btc(p.fee as i64),
+        style(unit).dim()
     ));
-    boxed(&lines);
+    let rate = format!("{:.1} sat/vB  ·  {} input(s)", p.rate, p.inputs.len());
+    lines.push(format!("{:<12}{}", style("Fee rate").dim(), rate));
+    lines.push(style("─".repeat(36)).dim().to_string());
+    lines.push(format!(
+        "{:<12}{} {}",
+        style("Total").dim(),
+        style(fmt_btc((p.amount + p.fee) as i64)).yellow().bold(),
+        style(unit).dim()
+    ));
+    crate::ui::card("Payment", &lines);
     if pct(p.fee, p.amount) > 5.0 {
-        println!(
-            "{}",
-            style(format!(
-                "\n  ⚠ Fee is {:.1}% of the amount.",
-                pct(p.fee, p.amount)
-            ))
-            .yellow()
-            .bold()
-        );
+        println!();
+        crate::ui::warn(&format!(
+            "Fee is {:.1}% of the amount.",
+            pct(p.fee, p.amount)
+        ));
     }
-    println!(
-        "\n{}",
-        style("  Check the address character by character. Sends cannot be undone.").dim()
-    );
+    println!();
+    crate::ui::warn("Check the address character by character. Sends cannot be undone.");
 }
 
 /// Returns Ok(true) if a transaction was broadcast.
@@ -562,7 +570,10 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
     if opened.network != network {
         return Err("Wallet network changed. Nothing was sent.".into());
     }
-    let signer = Signer::from_mnemonic(&opened.mnemonic, network)?;
+    // Only an authenticated `Opened` can produce a signer; it also supplies the
+    // network and BIP39 passphrase, so the old "wrong passphrase" mismatch is now
+    // structurally impossible.
+    let signer = Signer::from_opened(&opened)?;
     drop(opened);
     if signer.account_xpub()? != watch.xpub_string() {
         return Err("Keys do not match this wallet session. Nothing was sent.".into());
@@ -803,5 +814,45 @@ mod tests {
         bad.insert(a0, (0u32, 5u32));
         let mut tx2 = build_tx(&p);
         assert!(sign(&mut tx2, &p, &signer, &bad).is_err());
+    }
+
+    /// Sending from a wallet with a BIP39 passphrase must use the same seed the
+    /// watch-only session was derived from, otherwise the account keys do not
+    /// match and signing is refused.
+    #[test]
+    fn signature_verifies_with_passphrase() {
+        let m = Mnemonic::parse(ABANDON).unwrap();
+        let pass = "correct horse";
+        let watch = Watch::from_mnemonic_with_passphrase(&m, Network::Testnet, pass).unwrap();
+        let signer = Signer::from_mnemonic_with_passphrase(&m, Network::Testnet, pass).unwrap();
+        assert_eq!(signer.account_xpub().unwrap(), watch.xpub_string());
+
+        let a0 = watch.address_at(0, 0).unwrap();
+        let change = parse_address(&watch.address_at(1, 0).unwrap(), Network::Testnet).unwrap();
+        let to = parse_address(&watch.address_at(0, 1).unwrap(), Network::Testnet).unwrap();
+        let mut keymap = HashMap::new();
+        keymap.insert(a0.clone(), (0u32, 0u32));
+        let p = plan(vec![utxo(100_000, &a0)], to, Some(30_000), 2.0, change).unwrap();
+
+        let mut tx = build_tx(&p);
+        sign(&mut tx, &p, &signer, &keymap).unwrap();
+
+        let secp = Secp256k1::new();
+        let wit = &tx.input[0].witness;
+        let sig = Signature::from_slice(wit.nth(0).unwrap()).unwrap();
+        let pk = bitcoin::secp256k1::PublicKey::from_slice(wit.nth(1).unwrap()).unwrap();
+        let spk = parse_address(&a0, Network::Testnet)
+            .unwrap()
+            .script_pubkey();
+        let mut cache = SighashCache::new(&tx);
+        let h = cache
+            .p2wpkh_signature_hash(0, &spk, Amount::from_sat(100_000), EcdsaSighashType::All)
+            .unwrap();
+        secp.verify_ecdsa(&Message::from(h), &sig.signature, &pk)
+            .unwrap();
+
+        // The passphrase-less derivation is a different wallet entirely.
+        let wrong = Signer::from_mnemonic(&m, Network::Testnet).unwrap();
+        assert_ne!(wrong.account_xpub().unwrap(), watch.xpub_string());
     }
 }

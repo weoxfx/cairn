@@ -4,6 +4,7 @@
 //! After unlock we keep only a `Watch` (account xpub). The seed is dropped, so the
 //! network code never has access to anything that can spend.
 
+use crate::keystore;
 use bip39::Mnemonic;
 use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpriv, Xpub};
 use bitcoin::psbt::Psbt;
@@ -195,16 +196,41 @@ pub struct Signer {
 }
 
 impl Signer {
-    #[allow(dead_code)] // compatibility/test entry point
-    pub fn from_mnemonic(mnemonic: &Mnemonic, network: Network) -> Result<Self, String> {
-        Self::from_mnemonic_with_passphrase(mnemonic, network, "")
+    /// The only way to obtain signing keys.
+    ///
+    /// A [`keystore::Opened`] value can only be produced by
+    /// [`keystore::open_with`], which verifies the AEAD tag with the password and
+    /// re-derives the fingerprint from the decrypted seed. Holding one therefore
+    /// means the wallet file was authenticated in this session.
+    ///
+    /// The network and BIP39 passphrase are taken from that authenticated value
+    /// rather than from the caller, so a signer cannot be built for a different
+    /// chain, or with a different passphrase, than the one the wallet was
+    /// unlocked with.
+    pub fn from_opened(opened: &keystore::Opened) -> Result<Self, String> {
+        Self::derive(&opened.mnemonic, opened.network, &opened.passphrase)
     }
 
-    pub fn from_mnemonic_with_passphrase(
+    /// Test-only: derive directly from a mnemonic. Kept out of the public API so
+    /// no non-test code path can sign without unlocking a wallet first.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn from_mnemonic(mnemonic: &Mnemonic, network: Network) -> Result<Self, String> {
+        Self::derive(mnemonic, network, "")
+    }
+
+    /// Test-only counterpart of [`Signer::from_opened`] for passphrase seeds.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn from_mnemonic_with_passphrase(
         mnemonic: &Mnemonic,
         network: Network,
         passphrase: &str,
     ) -> Result<Self, String> {
+        Self::derive(mnemonic, network, passphrase)
+    }
+
+    fn derive(mnemonic: &Mnemonic, network: Network, passphrase: &str) -> Result<Self, String> {
         let secp = Secp256k1::new();
         let mut master = master_with_passphrase(mnemonic, network, passphrase)?;
         let path = DerivationPath::from_str(&format!("m/84'/{}'/0'", coin_type(network)))
@@ -439,6 +465,33 @@ mod tests {
         assert_eq!(parse_bip84_path(&test, Network::Bitcoin), None);
         let wrong: DerivationPath = "m/44'/1'/0'/0/7".parse().unwrap();
         assert_eq!(parse_bip84_path(&wrong, Network::Testnet), None);
+    }
+
+    #[test]
+    fn signer_from_opened_uses_the_unlocked_passphrase_and_network() {
+        let m = Mnemonic::parse(ABANDON).unwrap();
+        let opened = keystore::Opened {
+            mnemonic: Box::new(m.clone()),
+            passphrase: Zeroizing::new("correct horse".to_string()),
+            fingerprint: "73c5da0a".into(),
+            network: Network::Testnet,
+        };
+        let signer = Signer::from_opened(&opened).unwrap();
+        let expected =
+            Signer::from_mnemonic_with_passphrase(&m, Network::Testnet, "correct horse").unwrap();
+        assert_eq!(
+            signer.account_xpub().unwrap(),
+            expected.account_xpub().unwrap()
+        );
+        assert_eq!(signer.network(), Network::Testnet);
+
+        // Deriving with an empty passphrase must not match: the passphrase comes
+        // from the opened wallet, never from the caller.
+        let plain = Signer::from_mnemonic(&m, Network::Testnet).unwrap();
+        assert_ne!(
+            signer.account_xpub().unwrap(),
+            plain.account_xpub().unwrap()
+        );
     }
 
     #[test]

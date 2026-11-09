@@ -162,8 +162,8 @@ pub fn sign_psbt(input: String, out: Option<String>) -> Result<(), String> {
     crate::ui::set_network(network);
     let watch =
         Watch::from_mnemonic_with_passphrase(&opened.mnemonic, network, &opened.passphrase)?;
-    let signer =
-        Signer::from_mnemonic_with_passphrase(&opened.mnemonic, network, &opened.passphrase)?;
+    // The signer can only come from the wallet that was just authenticated.
+    let signer = Signer::from_opened(&opened)?;
     drop(opened);
 
     let verified = verify_psbt(&psbt, &watch, &signer, network)?;

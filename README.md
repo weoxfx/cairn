@@ -214,9 +214,20 @@ The usual PSBT review still happens after scanning.
 - **Labels:** `cairn --label <TXID> "<label>"` stores a BIP329 `tx` record in
   `~/.cairn/labels.jsonl`; labels appear in the transaction list.
 
+## Security check
+
+`cairn security check [WALLET] [--json]` reports what this build can actually verify for one
+wallet: file encryption and format version, file permissions, KDF parameters, ciphertext integrity
+(it asks for your password and re-derives the fingerprint), network/Tor configuration, recovery
+metadata, and this process's memory protections. It is also available from the wallet dashboard. Features Cairn does not have — hardware signers,
+multisig, backup verification, final signed-transaction re-display, a third-party audit — are
+listed as `SKIP` with the reason, never as `PASS`. A failing check exits non-zero. The report is
+not an audit and does not certify a wallet as secure; passing checks only mean nothing in the
+inspected set was wrong.
+
 ## JSON output
 
-`--json` currently covers `--version`, `--descriptor` and `--label`. It is intended for scripts and
+`--json` currently covers `--version`, `--descriptor`, `--label` and `security check`. It is intended for scripts and
 integration tests, not for interactive use. Errors still go to stderr as text.
 
 ## Development

@@ -186,6 +186,14 @@ fn providers(net: Net) -> Vec<String> {
     net.providers().iter().map(|s| s.to_string()).collect()
 }
 
+/// Whether `CAIRN_API` replaced the built-in provider list with the user's own
+/// server. Reported by `cairn security check`.
+pub fn custom_api() -> bool {
+    std::env::var("CAIRN_API")
+        .map(|v| v.split(',').any(|s| !s.trim().is_empty()))
+        .unwrap_or(false)
+}
+
 pub fn providers_desc(net: Net) -> String {
     providers(net).join(", ")
 }
