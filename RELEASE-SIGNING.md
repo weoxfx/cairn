@@ -56,8 +56,8 @@ Manual verification:
 
 ```sh
 minisign -Vm SHA256SUMS -x SHA256SUMS.minisig -P "$CAIRN_MINISIGN_PUBKEY"
-grep '  cairn-v0.2.0-x86_64-unknown-linux-musl.tar.gz$' SHA256SUMS
-sha256sum -c <(grep '  cairn-v0.2.0-x86_64-unknown-linux-musl.tar.gz$' SHA256SUMS)
+grep '  cairn-v0.8.0-x86_64-unknown-linux-musl.tar.gz$' SHA256SUMS
+sha256sum -c <(grep '  cairn-v0.8.0-x86_64-unknown-linux-musl.tar.gz$' SHA256SUMS)
 ```
 
 ## Key rotation and compromise
@@ -74,5 +74,4 @@ sha256sum -c <(grep '  cairn-v0.2.0-x86_64-unknown-linux-musl.tar.gz$' SHA256SUM
 
 ## Current status
 
-Cairn is experimental. See [SECURITY.md](SECURITY.md) for the review status and known
-limits before using it with real funds.
+See [SECURITY.md](SECURITY.md) for the review status, threat model and known limits.

@@ -18,7 +18,7 @@ Options:
   --from-source  Build from source instead of downloading a release.
 
 Environment:
-  CAIRN_VERSION          Release tag to install, for example v0.2.0.
+  CAIRN_VERSION          Release tag to install, for example v0.8.0.
   CAIRN_INSTALL_DIR      Directory for the binary (default: ~/.local/bin).
   CAIRN_SOURCE_REF       Source branch/tag for --from-source (default: master).
   CAIRN_FROM_SOURCE      Set to 1 for a source build.

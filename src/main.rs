@@ -15,18 +15,13 @@ use bitcoin::Network;
 use console::style;
 use dialoguer::{Confirm, Input, Password};
 use qrcode::{render::unicode, QrCode};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use ui::{banner, boxed, clear, fail, fmt_btc, menu, ok, pause, short, spin, theme};
+use ui::{banner, card, clear, fail, fmt_btc, hint, menu, ok, pause, section, short, spin, theme};
 use wallet::Watch;
 use zeroize::Zeroizing;
 
 const MIN_PASSWORD_LEN: usize = 12;
 const IDLE_LOCK: Duration = Duration::from_secs(300);
-static MAINNET_SESSION: AtomicBool = AtomicBool::new(false);
-const MAINNET_NOTICE: &str = "\
-Cairn is experimental and has completed multiple independent AI-assisted source reviews.
-Mainnet uses real bitcoin; testnet is recommended for trying it out.";
 
 fn main() {
     hardening::init();
@@ -169,17 +164,16 @@ fn descriptor(wallet: Option<String>, json: bool) -> Result<(), String> {
         );
     } else {
         banner();
-        println!("{}\n", style("Watch-only descriptors (BIP84)").bold());
-        println!("  Wallet:      {name}");
-        println!("  Network:     {}", network::label(network));
-        println!("  Fingerprint: {fp}\n");
-        println!("  Receive: {}", style(receive).cyan());
-        println!("  Change:  {}", style(change).cyan());
-        println!(
-            "\n{}",
-            style("  These descriptors can see every address and balance, but cannot spend.")
-                .yellow()
-        );
+        section("Watch-only descriptors");
+        println!();
+        ui::kv("Wallet", &name);
+        ui::kv("Network", network::label(network));
+        ui::kv("Fingerprint", &fp);
+        println!();
+        ui::kv("Receive", &style(receive).cyan().to_string());
+        ui::kv("Change", &style(change).cyan().to_string());
+        println!();
+        hint("Watch-only: these descriptors can see every address and balance, but cannot spend.");
     }
     Ok(())
 }
@@ -228,19 +222,14 @@ fn seedqr(wallet: Option<String>) -> Result<(), String> {
     );
     ui::secret_screen(|| {
         banner();
-        println!("{}", style("NUMERIC SEEDQR — YOUR SEED").red().bold());
+        section("Numeric SeedQR");
         println!(
-            "{}",
-            style("Scan only with a trusted offline device. This screen leaves no scrollback.")
-                .yellow()
+            "  {}",
+            style("Your seed as a numeric QR code. Scan it only on a trusted offline device.")
+                .dim()
         );
         println!("\n{}\n", art.as_str());
-        println!(
-            "{}",
-            style("Anyone who photographs this can take your coins.")
-                .red()
-                .bold()
-        );
+        hint("This screen is not kept in scrollback. Clear the terminal when finished.");
         pause();
     });
     Ok(())
@@ -263,7 +252,7 @@ fn label_tx(txid: &str, label: &str, json: bool) -> Result<(), String> {
 fn help() {
     println!(
         "\
-Cairn - experimental Bitcoin wallet (testnet by default)
+Cairn — self-custody Bitcoin wallet
 
 Usage:
   cairn                                      Interactive wallet
@@ -287,49 +276,12 @@ Global:
 Environment:
   CAIRN_API=https://your-server/api          Use your own Esplora server
   CAIRN_PROXY=socks5://127.0.0.1:9050        Route API traffic through a proxy
-  CAIRN_TOR=1                                Shorthand for the local Tor SOCKS port"
+  CAIRN_TOR=1                                Shorthand for the local Tor SOCKS port
+
+Network:
+  Mainnet is used by default for new wallets. Testnet (Testnet4, Testnet3
+  and Signet) can be selected when creating or importing a wallet."
     );
-}
-
-/// Ask when a mainnet wallet is created or imported. Existing wallets use
-/// their recorded network without another prompt.
-pub(crate) fn confirm_mainnet() -> Result<(), String> {
-    ui::set_network(Network::Bitcoin);
-    banner();
-    println!("{}\n", style(MAINNET_NOTICE).yellow());
-    let proceed = Confirm::with_theme(&theme())
-        .with_prompt("Use Mainnet with real bitcoin?")
-        .default(false)
-        .interact()
-        .map_err(|e| e.to_string())?;
-    if !proceed {
-        ui::set_network(Network::Testnet);
-        return Err("Mainnet session cancelled.".into());
-    }
-    MAINNET_SESSION.store(true, Ordering::SeqCst);
-    Ok(())
-}
-
-/// One typed confirmation per process before any mainnet wallet is unlocked,
-/// PSBT is created/signed, or transaction is broadcast (M-02). The flag is
-/// process-local and resets when Cairn exits.
-pub(crate) fn confirm_mainnet_session() -> Result<(), String> {
-    if MAINNET_SESSION.load(Ordering::SeqCst) {
-        return Ok(());
-    }
-    ui::set_network(Network::Bitcoin);
-    banner();
-    println!("{}\n", style(MAINNET_NOTICE).yellow());
-    let answer: String = Input::with_theme(&theme())
-        .with_prompt("Type MAINNET to use real bitcoin in this session")
-        .allow_empty(true)
-        .interact_text()
-        .map_err(|e| e.to_string())?;
-    if answer.trim() != "MAINNET" {
-        return Err("Mainnet session not confirmed. Nothing was done.".into());
-    }
-    MAINNET_SESSION.store(true, Ordering::SeqCst);
-    Ok(())
 }
 
 fn interactive() -> Result<(), String> {
@@ -443,24 +395,22 @@ fn ask_passphrase() -> Result<Option<Zeroizing<String>>, String> {
 
 // ---------- create / import / open ----------
 
-/// Testnet is the recommended default. Mainnet is always available and still
-/// gets a one-time confirmation.
+/// Mainnet is the default. Testnet remains available for development and testing.
 fn ask_network() -> Result<Network, String> {
-    let i = menu(&[
-        "Testnet (recommended; no real funds)",
-        "Mainnet (real bitcoin; experimental)",
-    ])?;
-    if i == 1 {
-        confirm_mainnet()?;
-        Ok(Network::Bitcoin)
+    hint("Mainnet is for real bitcoin. Testnet is for testing.");
+    println!();
+    let i = menu(&["Mainnet", "Testnet"])?;
+    Ok(if i == 0 {
+        Network::Bitcoin
     } else {
-        Ok(Network::Testnet)
-    }
+        Network::Testnet
+    })
 }
 
 fn create_wallet() -> Result<(), String> {
     banner();
-    println!("{}\n", style("Create New Wallet").bold());
+    section("Create wallet");
+    println!();
     let network = ask_network()?;
     ui::set_network(network);
     let name = ask_name()?;
@@ -475,11 +425,12 @@ fn create_wallet() -> Result<(), String> {
     // Shown on the terminal's alternate screen: never enters scrollback, wiped afterwards.
     ui::secret_screen(|| {
         banner();
-        println!("{}", style("WRITE THESE 24 WORDS ON PAPER").red().bold());
+        section("Recovery phrase");
         println!(
-            "{}\n",
-            style("Anyone with them can take your coins. No photos, no screenshots.").yellow()
+            "  {}",
+            style("Write down these 24 words in order and keep them offline.").dim()
         );
+        println!();
         for i in 0..12 {
             println!(
                 "  {:>2}. {:<9}  {:>2}. {}",
@@ -506,10 +457,10 @@ fn create_wallet() -> Result<(), String> {
     }
     picks.sort();
     banner();
-    println!(
-        "{}\n",
-        style("Backup check: enter these words from your paper copy").bold()
-    );
+    section("Backup check");
+    println!();
+    hint("Enter three words from your paper backup.");
+    println!();
     for idx in picks {
         let answer: String = Input::with_theme(&theme())
             .with_prompt(format!("Word #{}", idx + 1))
@@ -539,19 +490,19 @@ fn create_wallet() -> Result<(), String> {
     )?;
     banner();
     ok(&format!("Wallet '{}' created", style(&name).bold()));
-    println!("  Fingerprint: {fp}");
-    println!("  Stored encrypted at ~/.cairn/wallets/{name}.cairn");
-    println!(
-        "{}\n",
-        style("  Your paper backup is the real recovery path. Keep it safe.").yellow()
-    );
+    println!();
+    ui::kv("Fingerprint", &fp);
+    ui::kv("Location", &format!("~/.cairn/wallets/{name}.cairn"));
+    println!();
+    hint("Keep your paper recovery phrase somewhere safe.");
     pause();
     Ok(())
 }
 
 fn import_wallet() -> Result<(), String> {
     banner();
-    println!("{}\n", style("Import Wallet").bold());
+    section("Import wallet");
+    println!();
     let network = ask_network()?;
     ui::set_network(network);
     let name = ask_name()?;
@@ -655,9 +606,6 @@ pub(crate) fn unlock_wallet_with(
                 {
                     return Err("Wallet fingerprint changed. Nothing was signed.".into());
                 }
-                if opened.network == Network::Bitcoin {
-                    confirm_mainnet_session()?;
-                }
                 unlocked = Some(opened);
                 break;
             }
@@ -672,7 +620,8 @@ pub(crate) fn unlock_wallet_with(
 
 fn open_wallet() -> Result<(), String> {
     banner();
-    println!("{}\n", style("Open Wallet").bold());
+    section("Open wallet");
+    println!();
     let name = choose_wallet(None)?;
     let opened = unlock_wallet(&name)?;
     let network = opened.network;
@@ -711,24 +660,19 @@ fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
     }
     loop {
         banner();
-        println!(
-            "{} {}   {} {}
-",
-            style("wallet").dim(),
-            style(name).bold(),
-            style("fp").dim(),
-            fp
-        );
+        ui::kv("Wallet", &style(name).bold().to_string());
+        ui::kv("Fingerprint", fp);
+        println!();
         match &state {
             Some(s) => {
-                let mut lines = vec![
-                    style("BALANCE").dim().to_string(),
-                    format!(
-                        "{} {}",
-                        style(fmt_btc(s.confirmed)).green().bold(),
-                        style(network::unit(watch.network())).dim()
-                    ),
-                ];
+                let mut lines = vec![style(format!(
+                    "{} {}",
+                    fmt_btc(s.confirmed),
+                    network::unit(watch.network())
+                ))
+                .green()
+                .bold()
+                .to_string()];
                 if s.unconfirmed != 0 {
                     lines.push(
                         style(format!("{} pending", fmt_btc(s.unconfirmed)))
@@ -738,7 +682,7 @@ fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
                 }
                 lines.push(
                     style(format!(
-                        "{} address(es) used · next receive #{}",
+                        "{} addresses used  ·  next receive #{}",
                         s.used.len(),
                         s.next_receive
                     ))
@@ -747,24 +691,29 @@ fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
                 );
                 if let Some(t) = synced_at {
                     lines.push(
-                        style(format!("updated {}s ago", t.elapsed().as_secs()))
+                        style(format!("Updated {}s ago", t.elapsed().as_secs()))
                             .dim()
                             .to_string(),
                     );
                 }
                 if last_err.is_some() {
                     lines.push(
-                        style("⚠ refresh failed, showing last balance")
+                        style("Connection issue — showing the last known balance")
                             .yellow()
                             .to_string(),
                     );
                 }
-                boxed(&lines);
+                card("Balance", &lines);
             }
-            None => boxed(&[
-                style("BALANCE").dim().to_string(),
-                style("not synced (choose Refresh)").yellow().to_string(),
-            ]),
+            None => card(
+                "Balance",
+                &[
+                    style("Not synced").yellow().to_string(),
+                    style("Choose Refresh to load your balance.")
+                        .dim()
+                        .to_string(),
+                ],
+            ),
         }
         if let Some(p) = esplora::proxy_desc() {
             ui::info(&format!("proxy: {p}"));
@@ -775,12 +724,12 @@ fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
         println!();
         let asked = Instant::now();
         let choice = menu(&[
-            "Send  ↗",
-            "Receive  ↙",
+            "Send bitcoin",
+            "Receive",
             "Transactions",
             "Refresh",
-            "Wallet Info",
-            "Lock & Exit",
+            "Wallet information",
+            "Lock and exit",
         ])
         .unwrap_or(5);
         if asked.elapsed() > IDLE_LOCK {
@@ -843,32 +792,24 @@ fn receive_screen(watch: &Watch, state: Option<&esplora::WalletState>) -> Result
     loop {
         banner();
         let addr = watch.address_at(0, index)?;
-        println!(
-            "{}\n",
-            style(format!("Receive ({})", network::label(network))).bold()
+        section(&format!("Receive · {}", network::label(network)));
+        println!();
+        card(
+            "Address",
+            &[
+                style(&addr).cyan().bold().to_string(),
+                style(wallet::derivation_path(network, 0, index))
+                    .dim()
+                    .to_string(),
+            ],
         );
-        println!("  {}", style(&addr).cyan().bold());
-        println!(
-            "  {}\n",
-            style(wallet::derivation_path(network, 0, index)).dim()
-        );
-        if network == Network::Bitcoin {
-            println!(
-                "{}",
-                style("  Mainnet address. Verify it on your device before sharing.").yellow()
-            );
-        } else {
-            println!("  Send only TESTNET coins here (e.g. from a faucet).");
-        }
-        println!("  Use a fresh address for each payment.");
+        println!();
+        hint("Use a new address for each payment and verify it before sharing.");
         if state.is_none() {
-            println!(
-                "{}",
-                style("  Not synced: this address may already be used.").yellow()
-            );
+            hint("Not synced yet: this address may already have been used.");
         }
         println!();
-        match menu(&["Show QR code", "Next address", "Back"])? {
+        match menu(&["Show QR code", "New address", "Back"])? {
             0 => show_qr(&addr)?,
             1 => index += 1,
             _ => return Ok(()),
@@ -886,11 +827,9 @@ fn show_qr(addr: &str) -> Result<(), String> {
         .light_color(unicode::Dense1x2::Dark)
         .build();
     println!("{}\n", art);
-    println!("  {}", style(addr).cyan());
-    println!(
-        "{}\n",
-        style("  If it won't scan, zoom out the terminal or check colors.").dim()
-    );
+    println!("  {}", style(addr).cyan().bold());
+    println!();
+    hint("Scan with any Bitcoin wallet. If it does not scan, enlarge the terminal.");
     pause();
     Ok(())
 }
@@ -900,7 +839,8 @@ fn transactions_screen(
     state: Option<&esplora::WalletState>,
 ) -> Result<(), String> {
     banner();
-    println!("{}\n", style("Transactions").bold());
+    section("Transactions");
+    println!();
     let Some(s) = state else {
         fail("Not synced. Go back and Refresh first.");
         pause();
@@ -933,21 +873,26 @@ fn transactions_screen(
     for t in txs.iter().take(15) {
         let (icon, amount) = if t.net >= 0 {
             (
-                style("↙").green(),
-                style(format!("+{}", fmt_btc(t.net))).green().bold(),
+                style("↓").green().bold(),
+                style(format!("{:<16}", format!("+{}", fmt_btc(t.net))))
+                    .green()
+                    .bold(),
             )
         } else {
-            (style("↗").red(), style(fmt_btc(t.net)).red().bold())
+            (
+                style("↑").red().bold(),
+                style(format!("{:<16}", fmt_btc(t.net))).red().bold(),
+            )
         };
         let status = match t.height {
-            Some(h) => style(format!("block {h}")).dim(),
+            Some(h) => style(format!("confirmed · {h}")).dim(),
             None => style("pending".to_string()).yellow(),
         };
         let label = labels
             .get(&t.txid)
             .map(|l| format!("  {}", style(l).magenta()))
             .unwrap_or_default();
-        println!("  {} {}  {}{}", icon, amount, status, label);
+        println!("  {} {} {}{}", icon, amount, status, label);
         println!("    {}\n", style(short(&t.txid)).dim());
     }
 
@@ -975,7 +920,7 @@ fn transactions_screen(
                 labels.set(&txid, &label)
             };
             match result {
-                Ok(()) => ok("Label saved (BIP329, local only)"),
+                Ok(()) => ok("Label saved"),
                 Err(e) => fail(&e),
             }
         }
@@ -988,10 +933,10 @@ fn transactions_screen(
 fn info_screen(fp: &str, watch: &Watch) -> Result<(), String> {
     let net = esplora::net_for(watch.network())?;
     banner();
-    ui::section("Wallet Info");
+    section("Wallet information");
     println!();
     ui::kv("Fingerprint", fp);
-    ui::kv("Address type", "native SegWit (BIP84)");
+    ui::kv("Address type", "Native SegWit (BIP84)");
     ui::kv(
         "Network",
         &format!(
@@ -1005,28 +950,20 @@ fn info_screen(fp: &str, watch: &Watch) -> Result<(), String> {
         "Proxy",
         &esplora::proxy_desc().unwrap_or_else(|| "off (direct connection)".into()),
     );
-    ui::kv("Seed in memory", "no (wiped after unlock)");
+    ui::kv("Keys", "watch-only session (seed wiped after unlock)");
     ui::kv("Idle lock", "5 minutes");
-    println!("\n  Account xpub (watch-only; can see balance, cannot spend):");
+    println!();
+    section("Account xpub");
+    println!();
     println!("  {}", style(watch.xpub_string()).cyan());
-    println!("\n  Watch-only descriptors (BIP84):");
-    println!("  Receive: {}", style(watch.descriptor(0)?).cyan());
-    println!("  Change:  {}", style(watch.descriptor(1)?).cyan());
-    println!(
-        "\n{}",
-        style("  Anyone with the xpub or descriptors can see all your addresses and balance.")
-            .yellow()
-    );
-    println!(
-        "{}\n",
-        style("  Seed words are never shown here. Use your paper backup.").dim()
-    );
-    if watch.network() == Network::Bitcoin {
-        println!(
-            "{}\n",
-            style("  Mainnet: real bitcoin; experimental software.").yellow()
-        );
-    }
+    println!();
+    section("Watch-only descriptors (BIP84)");
+    println!();
+    ui::kv("Receive", &style(watch.descriptor(0)?).cyan().to_string());
+    ui::kv("Change", &style(watch.descriptor(1)?).cyan().to_string());
+    println!();
+    hint("Your xpub and descriptors can see every address and balance, but cannot spend.");
+    println!();
     pause();
     Ok(())
 }
@@ -1034,25 +971,25 @@ fn info_screen(fp: &str, watch: &Watch) -> Result<(), String> {
 fn settings() -> Result<(), String> {
     loop {
         banner();
-        println!("{}\n", style("Settings").bold());
+        section("Settings");
+        println!();
         let current = esplora::net();
-        println!("  Network:     {}", style(current.label()).cyan().bold());
-        println!(
-            "  API servers: {}",
-            style(esplora::providers_desc(current)).dim()
+        ui::kv("Default network", "Mainnet");
+        ui::kv("Testnet network", current.label());
+        ui::kv(
+            "API servers",
+            &style(esplora::providers_desc(current)).dim().to_string(),
         );
-        println!(
-            "  Proxy:       {}",
-            style(esplora::proxy_desc().unwrap_or_else(|| "off (direct connection)".into())).dim()
+        ui::kv(
+            "Proxy",
+            &style(esplora::proxy_desc().unwrap_or_else(|| "direct connection".into()))
+                .dim()
+                .to_string(),
         );
-        println!(
-            "{}\n",
-            style(
-                "  Set CAIRN_API=https://your-server/api for your own node, or \
-                 CAIRN_TOR=1 / CAIRN_PROXY=socks5://host:port for Tor."
-            )
-            .dim()
-        );
+        println!();
+        hint("Set CAIRN_API for your own Esplora server, or CAIRN_TOR=1 for Tor.");
+        hint("Testnet switching applies to testnet wallets; mainnet wallets stay on mainnet.");
+        println!();
         let nets = esplora::selectable_nets();
         let items: Vec<String> = nets
             .iter()

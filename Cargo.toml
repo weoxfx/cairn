@@ -1,8 +1,8 @@
 [package]
 name = "cairn"
-version = "0.2.0"
+version = "0.8.0"
 edition = "2021"
-description = "Experimental Bitcoin CLI wallet (testnet by default; mainnet source-reviewed)"
+description = "Self-custody Bitcoin wallet for the command line"
 license = "MIT OR Apache-2.0"
 
 [lib]

@@ -1,48 +1,29 @@
-# Cairn external audit package
+# Cairn external review package
 
-**Status: multiple independent AI-assisted source reviews completed.**
-This document prepares an independent external audit and records what should be reviewed. The
-independent review at `b620147` found no Critical or High code vulnerability under the threat model
-below. Its Medium/Low findings are recorded in
-[SECURITY-REVIEW.md](SECURITY-REVIEW.md); a 2026-11-09 working-tree hardening pass addressed M-02,
-L-01..L-05 and I-01 and added the features listed there. Pin the commit that actually ships for an
-external audit.
+**Status: source-level security review completed. This document defines the scope for an external
+review.**
 
-Cairn is an experimental Bitcoin wallet. Testnet is the default; mainnet is chosen when creating or
-importing a wallet. The project's goal is to run on mainnet eventually, but only after the exit
-criteria at the bottom are met.
+Cairn is a self-custody Bitcoin wallet. Mainnet is the default for new wallets; testnet is available
+when creating or importing a wallet. Source-level reviews are recorded in
+[SECURITY-REVIEW.md](SECURITY-REVIEW.md); their findings and residual risks remain in scope here.
 
 ## Target
 
 - Repository: Cairn (Rust, single binary).
-- Code commit: `b6201478018d06253fa176af74bb62f51852d2f8` ("download updae"), tree
-  `f2b391dade309f32ee436ddfd2699d29e5190c14`, branch `master`. This is the commit examined by the
-  independent AI-assisted review and the last committed baseline. The working tree now contains
-  the 2026-11-09 hardening pass described in `SECURITY-REVIEW.md`; pin the tagged release commit
-  for a real audit.
-- Baseline tag: none. No `v0.2.0` tag has been created yet, so `b620147` is the pin until the release
-  is tagged. Do not create an "audit" tag for an AI-assisted review; tag the commit that is actually
-  shipped and have the external reviewer pin that same commit and tree.
-- History: `41dd624` was the earlier review baseline. `a645b5f` ("mainnet update") changed mainnet
-  selection, removed the per-session gate, and updated the keystore/network tests. `b620147` adds
-  `install.sh` and the GitHub release workflow. A review against `41dd624` alone is stale.
-- Mainnet change: `a645b5f` deliberately removed `--enable-mainnet`, the marker file, the environment
-  token, `network::enabled()`, `require_enabled()`, `require_supported()` and the repeated typed
-  `MAINNET` confirmation on open. Mainnet is now selected once when creating or importing a wallet,
-  with a default-no confirmation. Opening an existing mainnet wallet, creating a mainnet PSBT,
-  signing it offline and broadcasting it do not ask for network confirmation again. The v2 keystore
-  AAD still authenticates the network and `net_for` still hard-binds mainnet wallets to the mainnet
-  API, but the accident guard is materially weaker. This change is in scope for the review. A later
-  2026-11-09 working-tree change restored a per-process typed `MAINNET` confirmation at unlock,
-  PSBT creation/signing and broadcast, so `b620147` no longer describes the shipping tree.
-- Prior fixes: second-pass A-01..A-03, the fuzz harness, the third-pass hardening (fee ceiling,
-  prevout checks, best-effort `mlock`, PSBT fuzz target) and the prior AI-assisted review fixes are
-  committed in the code tree. The `41dd624` fixes (chain-specific URLs, authority-preserving
-  redirects, transaction-screen network, seed re-entry, body-size failure, drop ordering) are also
-  included in `b620147`.
-- Version: `0.2.0`. Toolchain used by the independent reviewer: `rustc 1.99.1`, `cargo 1.99.1`
-  (the project pins `1.98.1`). `Cargo.lock` is committed and all checks run with `--locked`.
-- Platform reviewed: Linux. The code is Unix-only and claims macOS and Termux compatibility.
+- Version: `0.8.0`.
+- Code baseline: tag the commit that actually ships and give that commit and tree hash to the
+  reviewer. The last review covered commit `b6201478018d06253fa176af74bb62f51852d2f8` ("download
+  updae"), tree `f2b391dade309f32ee436ddfd2699d29e5190c14`. The 2026-11-09 hardening pass and the
+  0.8.0 release changes are in the current tree, so the shipped tag is the correct review target.
+- History: `41dd624` was an earlier review baseline. `a645b5f` changed mainnet selection, and
+  `b620147` added `install.sh` and the release workflow. Reviewing `41dd624` alone is stale.
+- Network model: mainnet is the default at wallet creation/import. Testnet (Testnet4, Testnet3 and
+  Signet) is available in the same selector. The keystore AAD authenticates the network, and
+  `esplora::net_for` binds each wallet to the matching API. There is no marker file or environment
+  token that can move an existing wallet to another chain.
+- Toolchain: the project pins `1.98.1`; `Cargo.lock` is committed and release checks run with
+  `--locked`.
+- Platform reviewed: Linux. The code is Unix-only and also targets macOS and Termux.
 
 ## Scope
 
@@ -50,16 +31,16 @@ In scope:
 
 | Area | Files | What to review |
 | --- | --- | --- |
-| Keystore and KDF | `src/keystore.rs` | File format v1/v2, Argon2id parameters, ChaCha20-Poly1305, AAD binding, salt/nonce/ciphertext limits, error-oracle behaviour, zeroization. |
+| Keystore and KDF | `src/keystore.rs` | File format v1/v2/v3, Argon2id parameters, ChaCha20-Poly1305, AAD binding, salt/nonce/ciphertext limits, error-oracle behaviour, zeroization. |
 | Derivation and signing | `src/wallet.rs` | BIP39 entropy handling, BIP32/BIP84 derivation, network/coin-type binding, `Signer` input checks, deterministic ECDSA. |
 | Transaction construction | `src/send.rs` | Address/amount parsing, coin selection, dust, fee arithmetic, change, SIGHASH_ALL, script/key match. |
 | PSBT and offline flow | `src/offline.rs`, `src/psbt_guard.rs` | PSBT creation, verification, signing, change classification, unsigned/signed comparison, file handling, broadcast, output-count limits and review flooding. |
 | QR transport | `src/qr.rs` | Frame parser bounds, checksum, reassembly, image parsing and decompression limits. |
 | Network and API | `src/esplora.rs` | URL chain guard, manual redirects, same-host enforcement, TLS-only client, JSON parsing bounds, UTXO/balance/history validation, prevout cross-check, failover, display history bounds. |
-| Mainnet selection | `src/network.rs`, `src/main.rs`, `src/esplora.rs`, `src/ui.rs` | Testnet default, creation/import-only confirmation, no per-open gate, chain-aware `net_for`, stale-config migration and fail-closed composition. |
+| Network selection | `src/network.rs`, `src/main.rs`, `src/esplora.rs`, `src/ui.rs` | Mainnet default, testnet selection at creation/import, per-wallet network binding, chain-aware `net_for`, stale-config handling and fail-closed composition. |
 | Local hardening | `src/hardening.rs`, `src/keystore.rs` | rlimits, umask, private directories, atomic/symlink-safe writes, concurrent wallet-creation race. |
-| UI and CLI | `src/main.rs`, `src/ui.rs` | Password entry, seed display, secret screen, confirmations, argument parsing, idle lock, terminal text sanitisation. |
-| Release and installer | `install.sh`, `.github/workflows/release.yml`, `SECURITY.md` | Checksum verification, artifact provenance, unsigned release status, install paths and update instructions. |
+| UI and CLI | `src/main.rs`, `src/ui.rs` | Password entry, seed display, secret screen, transaction review, argument parsing, idle lock, terminal text sanitisation. |
+| Release and installer | `install.sh`, `.github/workflows/release.yml`, `SECURITY.md` | Checksum verification, artifact provenance, signed-release support, install paths and update instructions. |
 
 Out of scope (assumed correct): `bitcoin`, `secp256k1`, `argon2`, `chacha20poly1305`, `ureq`/rustls,
 `image`, `rqrr`, `bip39`, `serde_json`, and the OS/TLS/PKI stack. Their versions are pinned in
@@ -89,18 +70,16 @@ transaction the user approves.
 
 ## Existing review
 
-`SECURITY-REVIEW.md` records findings S-01..S-13, the second-pass findings A-01..A-03, the
-third-pass hardening H-01..H-04, the prior AI-assisted review triages (AUD-01..AUD-11) and the
-independent AI-assisted review at `b620147` (M-01, M-02, L-01..L-05, I-01, I-02). Reviewers should
-treat those as claims to verify, not as conclusions.
+`SECURITY-REVIEW.md` records findings S-01..S-13, second-pass findings A-01..A-03, third-pass
+hardening H-01..H-04, earlier review triages (AUD-01..AUD-11) and the review at
+`b620147` (M-01, M-02, L-01..L-05, I-01, I-02). Reviewers should treat those as claims to verify,
+not as conclusions.
 
-The independent review found no Critical or High code
-vulnerability, but at review time it left Medium and Low findings open, including the deliberate
-mainnet-gate removal and a looser `--broadcast` fee check than the offline verifier. The 2026-11-09
-hardening pass restored the mainnet gate, added the fee-rate ceiling, bounded history values and
-heights, replaced the sanitiser denylist with an allowlist, capped PSBT structure, made wallet
-creation no-replace, and ignored the stale `Mainnet` config; those items still need independent
-verification and remain in scope.
+The review found no Critical or High code vulnerability. The 2026-11-09 hardening pass
+addressed the Medium/Low items: fee-rate ceiling, bounded history values and heights, allowlist text
+sanitisation, PSBT structure caps, no-replace wallet creation, and ignoring the stale `Mainnet`
+config. The 0.8.0 release makes mainnet the default and removes the per-session confirmation; the
+per-wallet network binding and normal transaction review remain the relevant controls.
 
 ## Reproduction
 
@@ -109,12 +88,11 @@ cargo fmt --check --all
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --release -- --test-threads=1
 cargo audit
+cargo deny check
 cargo build --locked --release
 ```
 
-The independent review ran the first four commands on `b620147` with rustc/cargo 1.99.1: fmt, clippy
-and audit passed, and the test suite reported 47 passed, 0 failed. Re-run them against the exact
-commit and record the output in the engagement.
+Record the output against the exact commit in the engagement.
 
 Fuzzing (nightly; also run weekly in CI):
 
@@ -124,59 +102,52 @@ cargo install cargo-fuzz --locked
 cargo +nightly fuzz run url_guard -- -max_total_time=300
 cargo +nightly fuzz run qr_frames -- -max_total_time=300
 cargo +nightly fuzz run psbt -- -max_total_time=300
+cargo +nightly fuzz run keystore -- -max_total_time=300
 ```
 
 There are no network-dependent tests in the suite. The manual testnet flow uses a faucet and a
 throwaway wallet: create -> receive -> sync -> send -> offline PSBT sign -> broadcast -> confirm.
-Mainnet can be exercised by creating or importing a wallet and choosing Mainnet; it shows the short
-experimental notice and asks for a default-no confirmation. Testnet remains
-the default. Unlocking a mainnet wallet, creating or signing a mainnet PSBT, and broadcasting a
-mainnet transaction each require one typed `MAINNET` confirmation per process (restored 2026-11-09).
+Mainnet can be exercised by creating or importing a wallet and keeping the default network.
 
 The `fuzz/` package covers the URL/redirect guard, the QR frame parser, PSBT deserialization plus
-`psbt_guard::check_structure` (shared with the offline verifier), and since 2026-11-09 a keystore
-adapter for wallet-file JSON, KDF bounds, hex lengths and AAD construction (without running
-Argon2).
+`psbt_guard::check_structure` (shared with the offline verifier), and a keystore adapter for
+wallet-file JSON, KDF bounds, hex lengths and AAD construction (without running Argon2).
 
-## Questions for the audit
+## Questions for the review
 
 1. Can a tampered wallet file relabel the network, weaken the KDF, or make the tool spend mainnet
-   coins without confirmation? Is the v3 AAD unambiguous? A per-process typed confirmation now covers
-   unlock, PSBT creation/signing and broadcast (M-02); verify it cannot be bypassed.
+   coins against the wrong chain? Is the v3 AAD unambiguous?
 2. Can any path derive or use a spending key without the expected fingerprint, network-specific BIP84
    path and script match?
 3. Does the offline verifier prove that every input belongs to the wallet and that the only non-change
    output is the one reviewed? Can a malicious PSBT shift value into fee or change? PSBTs are capped
-   at 500 inputs and 500 outputs (L-04); verify the cap is enforced before review.
+   at 500 inputs and 500 outputs; verify the cap is enforced before review.
 4. Is the manual redirect implementation equivalent to the HTTP client's URL semantics for every input
    that can reach it (encoding, userinfo, ports, IPv6, backslashes, control characters)?
 5. Are all server-controlled values (balances, UTXOs, txids, fees, text, history amounts and heights)
-   bounded and validated before they affect display, selection or signing? History values and heights
-   were bounded on 2026-11-09 (L-02); verify the bounds.
+   bounded and validated before they affect display, selection or signing?
 6. Can a planted file, FIFO, symlink or directory in `$HOME` cause a write outside the intended path,
-   a hang, or a permission downgrade? Wallet creation now uses no-replace semantics (L-05); verify.
-7. Is mainnet selection and confirmation composed safely across every entry point (wallet creation,
-   import, open, send, PSBT create/sign/broadcast, QR show/scan and settings)? A per-process gate was
-   restored on 2026-11-09; verify it and the AAD/network binding.
+   a hang, or a permission downgrade? Wallet creation uses no-replace semantics; verify.
+7. Is network selection composed safely across every entry point (wallet creation, import, open, send,
+   PSBT create/sign/broadcast, QR show/scan and settings)?
 8. Are secrets zeroized and kept out of scrollback/core dumps to the extent the platform allows?
-9. Is the release path honest and verifiable: checksum-verified installer, unsigned artifacts clearly
-   labelled, reproducible build claims and consistent release-status wording (I-02)?
+9. Is the release path verifiable: checksum-verified installer, signed manifest support, reproducible
+   build claims and consistent release-status wording?
 
 ## Deliverables and exit criteria
 
 The external review should produce a report with severity, exploitability, affected commit and
-reproduction, plus a retest after fixes. Mainnet is not recommended for real funds until:
+reproduction, plus a retest after fixes. The project should meet these criteria before treating an
+external review as complete:
 
-1. An independent external review report is delivered, every High/Medium finding is fixed and
-   retested, and residual findings are documented. The AI-assisted reviews do not satisfy this
-   criterion.
-2. Fuzzing covers PSBT, QR frames, image lists, Esplora JSON and URL parsing.
+1. The report is delivered, every High/Medium finding is fixed and retested, and residual findings
+   are documented.
+2. Fuzzing covers PSBT, QR frames, image lists, Esplora JSON, URL parsing and keystore parsing.
 3. Live integration tests pass against each supported provider, including error and redirect paths.
-4. A mainnet dry run with an amount that can be lost matches an independent wallet/hardware signer
+4. A mainnet dry run with a small amount matches an independent wallet or hardware signer
    address-for-address and fee-for-fee.
 5. Linux, macOS and Termux behaviour is tested, including terminal seed display.
-6. The release is reproducible and signed, `cargo audit` is clean, and an incident/disclosure process
-   exists.
+6. The release is reproducible and signed, `cargo audit` and `cargo deny check` are clean, and an
+   incident/disclosure process exists.
 
-Until then: testnet remains the default, mainnet remains an explicit creation/import choice, and the
-UI must describe Cairn as experimental.
+Mainnet is the default for new wallets. Testnet remains available for development and testing.

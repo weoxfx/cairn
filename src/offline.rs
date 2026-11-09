@@ -9,7 +9,7 @@ use crate::esplora;
 use crate::network;
 use crate::qr;
 use crate::send;
-use crate::ui::{banner, boxed, fmt_btc, menu, ok, pause, spin};
+use crate::ui::{banner, boxed, fmt_btc, menu, ok, pause, section, spin};
 use crate::wallet::{parse_bip84_path, Signer, Watch};
 use bitcoin::bip32::{ChildNumber, Fingerprint};
 use bitcoin::psbt::Psbt;
@@ -45,7 +45,8 @@ fn check_immediate(psbt: &Psbt) -> Result<(), String> {
 
 pub fn create_psbt(wallet: Option<String>, out: Option<String>) -> Result<(), String> {
     banner();
-    println!("{}\n", style("Create PSBT (online, watch-only)").bold());
+    section("Create PSBT (online, watch-only)");
+    println!();
     let name = crate::choose_wallet(wallet.as_deref())?;
     let opened = crate::unlock_wallet(&name)?;
     let network = opened.network;
@@ -151,7 +152,8 @@ pub fn create_psbt(wallet: Option<String>, out: Option<String>) -> Result<(), St
 
 pub fn sign_psbt(input: String, out: Option<String>) -> Result<(), String> {
     banner();
-    println!("{}\n", style("Sign PSBT (offline)").bold());
+    section("Sign PSBT (offline)");
+    println!();
     let mut psbt = read_psbt(&input)?;
 
     let name = crate::choose_wallet(None)?;
@@ -204,7 +206,8 @@ pub fn show_qr(path: String) -> Result<(), String> {
         crate::ui::set_network(network);
     }
     banner();
-    println!("{}\n", style("Show PSBT as QR").bold());
+    section("Show PSBT as QR");
+    println!();
     let frames = qr::show(&psbt.serialize())?;
     let _: String = Input::with_theme(&crate::ui::theme())
         .with_prompt("Press Enter when every frame has been captured")
@@ -227,7 +230,8 @@ pub fn show_qr(path: String) -> Result<(), String> {
 
 pub fn scan_qr(images: Vec<String>, out: Option<String>) -> Result<(), String> {
     banner();
-    println!("{}\n", style("Read PSBT from QR photos").bold());
+    section("Read PSBT from QR photos");
+    println!();
     let payloads = spin("Reading QR codes…", || qr::scan_images(&images))?;
     let data = qr::reassemble(&payloads)?;
     let psbt = Psbt::deserialize(&data).map_err(|e| format!("QR data is not a valid PSBT: {e}"))?;
@@ -350,7 +354,8 @@ fn verify_psbt(
 fn show_psbt_review(v: &Verified, network: Network) {
     let unit = network::unit(network);
     banner();
-    println!("{}\n", style("Review PSBT").bold());
+    section("Review PSBT");
+    println!();
     if v.external.is_empty() {
         println!(
             "{}",
@@ -407,11 +412,9 @@ pub fn broadcast(unsigned_path: String, signed_path: String) -> Result<(), Strin
     let unsigned = read_psbt(&unsigned_path)?;
     let network = psbt_network(&unsigned)?;
     crate::ui::set_network(network);
-    if network == Network::Bitcoin {
-        crate::confirm_mainnet_session()?;
-    }
     banner();
-    println!("{}\n", style("Broadcast signed PSBT (online)").bold());
+    section("Broadcast signed PSBT (online)");
+    println!();
     let net = esplora::net_for(network)?;
     let unit = network::unit(network);
     let signed = read_psbt(&signed_path)?;
@@ -460,7 +463,8 @@ pub fn broadcast(unsigned_path: String, signed_path: String) -> Result<(), Strin
     }
 
     banner();
-    println!("{}\n", style("Review signed transaction").bold());
+    section("Review signed transaction");
+    println!();
     for output in &tx.output {
         let addr = Address::from_script(&output.script_pubkey, network)
             .map(|a| a.to_string())

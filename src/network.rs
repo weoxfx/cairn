@@ -1,12 +1,9 @@
 //! Network labels, units and hard limits shared by the wallet modules.
 //!
-//! Cairn is testnet-first: testnet is the default network. Mainnet is available
-//! when creating or importing a wallet, but it is experimental and has completed
-//! multiple independent AI-assisted source reviews. Selecting
-//! it is confirmed in the UI, and unlocking a mainnet wallet, creating or signing
-//! a mainnet PSBT, or broadcasting a mainnet transaction requires one typed
-//! `MAINNET` confirmation per process; there is no marker file or environment
-//! token.
+//! Mainnet is the default for new wallets, and testnet remains available when a
+//! wallet is created or imported. A wallet's network is recorded in the keystore
+//! and the API layer binds it to the matching chain; cross-chain endpoints are
+//! refused.
 
 use bitcoin::Network;
 

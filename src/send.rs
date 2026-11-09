@@ -3,7 +3,7 @@
 
 use crate::esplora::{self, Utxo, WalletState};
 use crate::network;
-use crate::ui::{banner, boxed, fmt_btc, menu, ok, pause, short, spin, theme};
+use crate::ui::{banner, boxed, fmt_btc, menu, ok, pause, section, short, spin, theme};
 use crate::wallet::{derivation_path, Signer, Watch};
 use bitcoin::absolute::LockTime;
 use bitcoin::address::NetworkUnchecked;
@@ -383,7 +383,8 @@ fn pct(fee: u64, amount: u64) -> f64 {
 pub fn review(p: &Plan, network: Network) {
     let unit = network::unit(network);
     banner();
-    println!("{}\n", style("Review transaction").bold());
+    section("Review transaction");
+    println!();
     println!("  {}", style("To").dim());
     println!("  {}\n", style(p.to.to_string()).cyan().bold());
     let mut lines = vec![

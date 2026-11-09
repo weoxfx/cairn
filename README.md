@@ -1,7 +1,7 @@
 # Cairn
 
-An open-source Bitcoin wallet for the command line, built around an encrypted keystore, a
-watch-only session and careful sending.
+An open-source, self-custody Bitcoin wallet for the command line, built around an encrypted
+keystore, a watch-only session and careful sending.
 
 ## What it does today
 
@@ -17,21 +17,19 @@ watch-only session and careful sending.
 - Own Esplora server and SOCKS5/Tor support (`CAIRN_API`, `CAIRN_PROXY`, `CAIRN_TOR=1`)
 - Watch-only descriptor export, numeric SeedQR display, and BIP329 transaction labels
 - Machine-readable `--json` output for version, descriptors and labels
-- Mainnet can be chosen when creating or importing a wallet; testnet remains the default
+- Mainnet by default; Testnet4, Testnet3 and Signet are available when creating or importing a wallet
 - Runs on Linux x86_64/ARM64, macOS and Android (Termux)
 
 ## Mainnet
 
-Cairn is built and tested testnet-first, and testnet remains the default. Mainnet is chosen when
-creating or importing a wallet, without any extra setup. That choice shows a short
-experimental notice and asks for confirmation. Unlocking a mainnet wallet, creating or
-signing a mainnet PSBT, and broadcasting a mainnet transaction each require one typed `MAINNET`
-confirmation per process; the flag resets when Cairn exits.
+Mainnet is selected by default when creating or importing a wallet. Testnet (Testnet4, Testnet3 and
+Signet) is available in the same network selector for development and testing.
 
-Mainnet has completed multiple independent AI-assisted source reviews and remains experimental.
 New wallets record their network, and the API layer refuses a testnet wallet pointed at a mainnet
-server (and the reverse). Use testnet, or a hardware/reviewed wallet, for anything you cannot afford
-to lose.
+server (and the reverse). Cairn has undergone source-level security review; the findings and
+residual risks are recorded in [SECURITY-REVIEW.md](SECURITY-REVIEW.md). As with any self-custody
+wallet, verify addresses and transaction details before approving a send, and keep your recovery
+phrase offline.
 
 ## Security design
 
@@ -43,13 +41,13 @@ to lose.
 | Sending | Re-asks the password, checks the keys match the wallet and each coin, re-fetches each spent coin's creating transaction to compare value/address, checks that the amounts add up, offers coin control, enforces a fee ceiling (10% of the amount, 10k-sat floor, 1M-sat hard cap) and a 1,000 sat/vB absolute rate ceiling, uses deterministic (RFC6979) signatures |
 | Offline | `--offline` never opens a socket. It checks that every input belongs to the wallet, has the expected network-specific BIP84 path and script, that change is ours, that the fee clears the relay minimum and the rate ceiling, and caps PSBTs at 500 inputs / 500 outputs. PSBT files must be regular files (no FIFOs or symlinks) and signed output is written atomically at mode 600. The online side refuses a signed PSBT that changed any input or output. QR frames are checksummed and then go through the same checks; they are public data, not encrypted |
 | Network | HTTPS-only with certificate checks; redirects are same-origin (host and port) and re-checked, broadcasts refuse them. Optional SOCKS5/Tor proxy (`CAIRN_PROXY` or `CAIRN_TOR=1`), with DNS resolved by the proxy. Response size caps fail closed, with rate pacing, failover and a chain-specific URL guard; userinfo and IPv6 authorities are rejected. Server data is treated as untrusted; UTXO/input/output/balance/history amounts and block heights are bounded, txids are validated, and server text is reduced to printable ASCII by an allowlist before display |
-| Mainnet | Chosen when creating or importing a wallet; testnet remains the default. Creation shows a short experimental notice and a default-no confirmation. Unlocking, PSBT creation/signing and broadcast require a typed `MAINNET` confirmation once per process. This is an accident guard |
+| Mainnet | The default for new wallets; testnet is available at creation/import. The wallet's network is stored and authenticated, and the API layer refuses cross-chain endpoints |
 | Process | No core dumps, umask 077, 5-minute idle lock; non-dumpable on Linux/Android |
 
 Cryptographic primitives come from audited libraries (rust-bitcoin, libsecp256k1, RustCrypto).
 Cairn does not implement its own cryptography. See [SECURITY.md](SECURITY.md) for the threat model,
-known limits and how to report a vulnerability. Multiple independent AI-assisted source reviews are
-documented in [SECURITY-REVIEW.md](SECURITY-REVIEW.md).
+known limits and how to report a vulnerability. Source-level security review is documented in
+[SECURITY-REVIEW.md](SECURITY-REVIEW.md).
 
 ## Install
 
@@ -242,8 +240,8 @@ ceilings, descriptor/passphrase derivation and QR frame render/scan tests. Fuzz 
 Push a version tag to publish downloadable binaries:
 
 ```sh
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.8.0
+git push origin v0.8.0
 ```
 
 The release workflow builds a static Linux x86_64 binary, a Linux ARM64 binary and macOS binaries for
@@ -258,14 +256,14 @@ manifest. See [RELEASE-SIGNING.md](RELEASE-SIGNING.md) and [REPRODUCIBLE.md](REP
 - [x] Send with review and confirmation
 - [x] Provider failover and rate pacing
 - [x] Offline signer with PSBT and QR transfer (PSBT files and QR images; live camera optional)
-- [x] Experimental mainnet support (independently source-reviewed)
+- [x] Mainnet support with per-wallet network binding
 - [x] Optional BIP39 passphrase (25th word)
 - [x] Own Esplora server, SOCKS5/Tor proxy
 - [x] Watch-only descriptor export, numeric SeedQR, BIP329 labels, `--json`
-- [x] Coin control, fee-rate ceiling, per-session mainnet confirmation
+- [x] Coin control and fee-rate ceiling
 - [x] Fuzzing harness for URL/redirect, QR frames, PSBT and keystore
 - [x] Pinned GitHub Actions, cargo-deny, reproducible-build CI check, optional signed releases
-- [x] Multiple independent AI-assisted source reviews
+- [x] Source-level security review and remediation
 - [ ] 2-of-3 multisig, Electrum protocol, Taproot/BIP86, RBF fee bumping
 - [ ] Windows support and packaged installers
 

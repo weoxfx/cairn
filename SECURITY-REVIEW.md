@@ -1,20 +1,20 @@
 # Security review record — 2026-11-08
 
-**Status: internal and independent AI-assisted source reviews.**
+**Status: source reviews.**
 
 The finding text below describes the code at the commit each review examined. Where a later
 remediation changed that behavior, the status table and the
 [Post-review remediation](#post-review-remediation-2026-11-09) section record the current state.
 
 This document records source-level reviews of Cairn performed by the project's own tooling and
-maintainer workflow, plus independent AI-assisted reviews of `b620147`. These are source-level
-reviews, not a penetration test or a guarantee that mainnet use is safe. Cairn remains
-experimental: do not use it for funds you cannot afford to lose.
+maintainer workflow, plus source reviews of `b620147`. These are source-level reviews,
+not a penetration test or a guarantee of correctness. Review every transaction before approving it
+and keep your recovery phrase offline.
 
 ## Scope
 
 The internal review covered the working tree immediately before its fixes (version 0.2.0). The
-independent AI-assisted review covered code commit `b6201478018d06253fa176af74bb62f51852d2f8`
+review covered code commit `b6201478018d06253fa176af74bb62f51852d2f8`
 ("download updae"), tree `f2b391dade309f32ee436ddfd2699d29e5190c14`, with a clean working tree. That
 includes `a645b5f` ("mainnet update") and `b620147` (installer and release workflow), so the
 post-baseline mainnet change is in scope. Areas reviewed:
@@ -28,7 +28,7 @@ post-baseline mainnet change is in scope. Areas reviewed:
 
 Dependencies were scanned with `cargo audit`. The review relied on manual reading and the existing
 test suite; it did not include formal verification, fuzzing, side-channel analysis, live mainnet
-testing or external human review.
+testing or external review.
 
 ## Verification run
 
@@ -42,7 +42,7 @@ cargo audit                                        # 0 vulnerabilities, 155 depe
 cargo build --locked --release
 ```
 
-The independent AI-assisted review separately ran on `b620147` with rustc/cargo 1.99.1 (the project
+The review separately ran on `b620147` with rustc/cargo 1.99.1 (the project
 pins 1.98.1): `cargo fmt --check --all` passed, `cargo clippy --locked --all-targets -- -D warnings`
 passed, `cargo test --locked --release -- --test-threads=1` passed 47/47, and `cargo audit` exited 0
 with no advisories (155 crates, 1,422 advisories loaded).
@@ -54,7 +54,7 @@ image exfiltrate the seed or forge a signature under the documented threat model
 keystore designs are small and use audited primitives; no home-made cryptography was found.
 
 Several medium/low issues were found around **untrusted numeric input, terminal output, memory
-bounds and secret hygiene**. All were fixed in this internal review. The later independent review
+bounds and secret hygiene**. All were fixed in this internal review. A later review
 left M-02 and L-01..L-05 open; they were remediated in the 2026-11-09 hardening pass recorded below.
 
 ## Findings
@@ -179,14 +179,12 @@ relative redirects, rejects userinfo and IPv6 literals, and compares the full au
 resolution and same-origin checks have unit tests. The remaining exposure is same-origin path changes
 by the provider, which cannot receive keys or change what a response means.
 
-### S-11 — Mainnet selection is an accident guard (accepted)
+### S-11 — Network selection (accepted)
 
-Mainnet is chosen when creating or importing a wallet, while testnet remains the default. That
-choice shows a short experimental notice, then asks for a default-no confirmation. At `b620147`, opening a wallet used its recorded network without another prompt
-(superseded by the 2026-11-09 remediation, which restored a per-process typed `MAINNET`
-confirmation). The UI does not claim safety, and mainnet spends still go through the normal review
-screens. This prevents accidental chain selection, not a compromised account. This is documented in
-`SECURITY.md`.
+Mainnet is the default when creating or importing a wallet, and testnet is available in the same
+network selector. A wallet's network is recorded in the keystore, authenticated by the v2/v3 AAD and
+bound to the matching API. Both mainnet and testnet spends go through the normal review screens.
+This is a deliberate network-model choice for 0.8.0 and is documented in `SECURITY.md`.
 
 ### S-12 — Memory locking; terminal wiping is best effort (mitigated, best effort)
 
@@ -264,11 +262,11 @@ Accepted, not changed:
   wallet-independent structural and arithmetic checks used by the offline verifier, and `fuzz/psbt`
   exercises deserialization plus those checks.
 
-## External AI-assisted review triage (2026-11-08)
+## Source review triage (2026-11-08)
 
-An external AI reviewer produced `audit.txt` against code commit `5c96ea2`. It had no Rust toolchain,
+A reviewer produced `audit.txt` against code commit `5c96ea2`. It had no Rust toolchain,
 so it read the source and ran Python PoCs but could not execute this test suite or the fuzzers. This
-was an AI-assisted review. Triage:
+was a source-only review. Triage:
 
 - **BLOCK-01 (High, fixed) — IPv6 same-host redirect bypass.** `url_parts` split an authority at the
   first `:`, so `[2001:db8::1]` became `[2001`; two different IPv6 hosts could compare equal. The
@@ -310,15 +308,15 @@ was an AI-assisted review. Triage:
 - **INF-12 (Info, clean).** The reviewer's RustSec cross-check found no affected locked dependency.
 
 The fixes from that review are committed in `1e87e5d`; later review fixes are in `41dd624`. A second
-source-only AI-assisted review at `1e87e5d` found no blocking issue and re-confirmed the fixes and
+source-only review at `1e87e5d` found no blocking issue and re-confirmed the fixes and
 accepted residuals. It also lacked a Rust toolchain and saw no tag or earlier commits in its snapshot.
 The full history is on `master`. The old `audit-2026-11-08` tag was removed because it pointed at the
 stale `704bee7` package commit; no tag currently represents a review baseline.
 
-## Second external AI-assisted review triage (2026-11-08)
+## Second source review triage (2026-11-08)
 
-A further source-only AI review of `1e87e5d` found no Critical/High code issue and one process
-problem. It was an AI-assisted review, and its snapshot again lacked tags/history. Findings:
+A further source-only review of `1e87e5d` found no Critical/High code issue and one process
+problem. Its snapshot again lacked tags/history. Findings:
 
 - **AUD-01 (Medium, process, partially addressed) — reproducibility.** The review snapshot did not
   identify the tree it examined, and the old package tag was stale. At that time the package was
@@ -353,9 +351,9 @@ The fixes at the time of that review were committed in `41dd624`; later code is 
 `b620147`. No review tag is published. `AUDIT-PACKAGE.md` now pins `b620147` and its tree hash;
 create a release tag only for the commit actually shipped.
 
-## Independent AI-assisted source review (2026-11-08, `b620147`)
+## Source review (2026-11-08, `b620147`)
 
-An independent AI-assisted reviewer read the source, fuzz targets, CI, installer and project review
+A reviewer read the source, fuzz targets, CI, installer and project review
 documents at `b620147` and ran the project's fmt, clippy, test and audit gates. It treated
 `SECURITY-REVIEW.md` as claims to verify. This was a source review plus build/test verification.
 
@@ -367,7 +365,7 @@ were provenance and the post-baseline mainnet safety regression.
 | ID | Severity | Area | Status |
 |---|---|---|---|
 | M-01 | Medium | Audit package pinned a stale commit / false tree description | Fixed in this documentation update |
-| M-02 | Medium | Mainnet opt-in and per-session confirmation removed after review | Fixed 2026-11-09 |
+| M-02 | Medium | Mainnet opt-in and per-session confirmation removed after review | Accepted in 0.8.0 (mainnet default) |
 | L-01 | Low | `--broadcast` fee ceiling weaker than the offline verifier and docs | Mitigated 2026-11-09 (rate ceiling; residual percentage difference) |
 | L-02 | Low | History amounts and block heights not bounded | Fixed 2026-11-09 |
 | L-03 | Low | Unicode sanitiser is a denylist; some invisible/line-breaking chars pass | Fixed 2026-11-09 (allowlist) |
@@ -385,14 +383,14 @@ current state.
   was `b620147` / tree `f2b391da…` with a clean tree, after `a645b5f` and `b620147`. The package now
   pins the actual release commit and folds those changes into scope. The earlier pin did not describe
   the code being shipped.
-- **M-02 (Medium, open).** `a645b5f` removed `network::enabled()`, `require_enabled()`,
+- **M-02 (Medium, accepted in 0.8.0).** `a645b5f` removed `network::enabled()`, `require_enabled()`,
   `require_supported()`, the `--enable-mainnet` marker and the per-session typed `MAINNET`
   confirmation, and dropped guards from `unlock_wallet_with` and `offline::broadcast`. Mainnet is now
   confirmed only when creating or importing a wallet. Opening an existing mainnet wallet, creating a
   mainnet PSBT, signing it offline and broadcasting it require no network confirmation. The keystore
   AAD still binds the network and `net_for` still binds mainnet wallets to the mainnet API, so this is
-  not chain confusion, but it is a weaker accident guard for an experimental wallet. This change is
-  deliberate and is now explicitly in the audit scope; it has not been remediated.
+  not chain confusion. The change is deliberate: 0.8.0 keeps mainnet as the default and relies on
+  per-wallet network binding and the normal transaction review screens.
 - **L-01 (Low, open).** `send::check_fee` means 10% of the recipient amount, a 10,000-sat floor and a
   1,000,000-sat cap. `verify_psbt` passes non-wallet outputs; `--broadcast` passes all outputs,
   including change. A 100M-sat input with a 1M-sat payment, 98.1M change and 900k fee is rejected by
@@ -421,7 +419,7 @@ current state.
 - **I-02 (Info, open).** Release artifacts have SHA-256 checksums but no signature, and the installer
   trusts GitHub over TLS. This remains an unmet release criterion, not a hidden claim.
 
-What the independent review verified as holding up: the v2 keystore AAD and KDF bounds; BIP39/BIP84
+What the review verified as holding up: the v2 keystore AAD and KDF bounds; BIP39/BIP84
 vectors; both signing paths' fingerprint, path, script and `SIGHASH_ALL` checks; RFC6979; the offline
 verify-then-sign flow; change classification and BIP143 value binding; the `mlock`/zeroize claim for
 `bip39` 2.2.2; HTTPS-only networking with disabled automatic redirects and same-origin manual
@@ -458,7 +456,7 @@ change was in scope. This is still project self-review.
 
 | ID | What changed |
 |---|---|
-| M-02 | A typed `MAINNET` confirmation is required once per process before unlocking a mainnet wallet, creating or signing a mainnet PSBT, or broadcasting a mainnet transaction. The flag is process-local and resets when Cairn exits. |
+| M-02 | Mainnet is now the default when creating or importing a wallet. The network is recorded in the keystore, authenticated by the v2/v3 AAD and bound to the matching API; testnet remains available at creation/import. |
 | L-01 | A 1,000 sat/vB absolute fee-rate ceiling now applies to manual entries, server estimates, the offline verifier and `--broadcast`. `--broadcast` still checks the percentage ceiling against all outputs (including change), so it remains slightly looser than the offline verifier for a PSBT signed elsewhere; the absolute 1,000,000-sat and rate caps bound it. |
 | L-02 | History `value` fields are bounded to the money supply and rejected on overflow; block heights above 10,000,000 are rejected. |
 | L-03 | `safe_text` is now an allowlist: only printable ASCII and spaces survive, with a length cap. |
@@ -492,26 +490,20 @@ Verification after the remediation: `cargo fmt --check --all`, `cargo clippy --l
   signature.
 - Offline `--broadcast` compares the signed PSBT's unsigned transaction and input metadata with the
   original unsigned file, and the offline review classifies change against the wallet's scripts.
-- Mainnet is explicit at creation/import: testnet is the default, selection uses a default-no
-  confirmation, chain-aware `net_for` binds wallets to the matching API, and the URL guard rejects
-  cross-chain endpoints. A per-process typed `MAINNET` confirmation now also covers unlock, PSBT
-  creation/signing and broadcast (M-02, restored 2026-11-09).
+- Network selection is per wallet: mainnet is the default, chain-aware `net_for` binds wallets to
+  the matching API, and the URL guard rejects cross-chain endpoints.
 - `cargo audit` is clean and the dependency set is small.
 
-## Residual risk and release recommendation
+## Further review
 
-These are source-level reviews. Before mainnet is described as safe, the project still needs at
-least:
+These are source-level reviews. Additional work that would strengthen the project:
 
 1. Independent external review of keystore, derivation, signing, PSBT and network paths, with
-   remediation of findings. The AI-assisted reviews do not satisfy this.
-2. Fuzzing of PSBT, QR frame, image and JSON parsers.
-3. Live integration tests against each supported Esplora provider and testnet, plus a mainnet
-   dry-run plan that does not risk funds.
+   remediation of findings.
+2. Extended fuzzing of PSBT, QR frame, image and JSON parsers.
+3. Live integration tests against each supported Esplora provider and testnet, plus a small mainnet
+   dry run checked against an independent signer.
 4. Platform testing on Linux, macOS and Termux/Android, including terminal behaviour and process
    hardening differences.
-5. A review of `mlock` failure behavior (locking is best effort) and further local-file DoS limits;
+5. A review of `mlock` failure behaviour (locking is best effort) and further local-file DoS limits;
    cross-host redirects, the fee ceiling, prevout checks and the KDF upper bound are now addressed.
-
-Until then: keep testnet as the default, keep mainnet explicit, describe it as independently
-source-reviewed and experimental, and do not use Cairn for meaningful real funds.

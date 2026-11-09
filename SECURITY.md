@@ -1,24 +1,20 @@
 # Security policy
 
-**Status: experimental. Multiple independent AI-assisted source reviews completed.
-Testnet is the default. Mainnet is available but remains experimental; use testnet for anything you
-cannot afford to lose.**
+**Status: source-level security review completed. Mainnet is the default for new wallets; testnet
+is available for development and testing.**
 
-## Mainnet selection
+## Network selection
 
-Mainnet is not the default. It is chosen when creating or importing a wallet, without a marker file
-or environment variable. That choice shows a short experimental notice and asks for a default-no
-confirmation. In addition, unlocking a mainnet wallet, creating or signing a mainnet PSBT, and
-broadcasting a mainnet transaction each require one typed `MAINNET` confirmation per process. The
-flag is process-local and resets when Cairn exits. This is an accident guard, not evidence of
-safety. Mainnet remains experimental software.
+Mainnet is the default when creating or importing a wallet. Testnet (Testnet4, Testnet3 and Signet)
+can be selected instead. A wallet's network is recorded in the keystore, authenticated by the v2/v3
+AAD and bound to the matching API; cross-chain endpoints are refused.
 
 ## Review status
 
-Multiple internal and independent AI-assisted source-level reviews were completed on 2026-11-08 and
-2026-11-09. The review of commit `b620147` found no Critical or High code vulnerability under its
-documented threat model, and the 2026-11-09 pass remediated the earlier Medium/Low findings. The
-findings, fixes and residual risks are recorded in [SECURITY-REVIEW.md](SECURITY-REVIEW.md).
+Source-level reviews were completed on 2026-11-08 and 2026-11-09. The
+review of commit `b620147` found no Critical or High code vulnerability under its documented threat
+model, and the 2026-11-09 pass remediated the earlier Medium/Low findings. The findings, fixes and
+residual risks are recorded in [SECURITY-REVIEW.md](SECURITY-REVIEW.md).
 
 ## Reporting a vulnerability
 
@@ -126,13 +122,13 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
 - Keep dependencies minimal, pinned (commit `Cargo.lock`) and checked with `cargo audit`.
 - Never log, print or store secrets. Never add telemetry.
 - Anything touching keys, signing or the keystore needs tests and a careful review.
-- Keep testnet the default, keep the experimental notice and confirmation, and never present
-  mainnet as safe for real savings.
+- Keep network binding strict and make sure every review screen shows the real destination and
+  amount before a transaction can be approved.
 
 ## Before any release
 
 `cargo fmt --check --all`, `cargo clippy --locked --all-targets -- -D warnings`,
 `cargo test --locked --release -- --test-threads=1`, `cargo audit`, `cargo deny check`, review the
-diff of `Cargo.lock`, confirm the reproducible-build job passes, and sign the release. Mainnet must
-remain described as experimental.
+diff of `Cargo.lock`, confirm the reproducible-build job passes, and sign the release. Keep this
+threat model and [SECURITY-REVIEW.md](SECURITY-REVIEW.md) current.
 

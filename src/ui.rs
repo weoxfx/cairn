@@ -1,16 +1,15 @@
-//! Terminal UI helpers: theme, banner, spinner, boxes, secret screen.
+//! Terminal UI: theme, compact header, cards, status lines and the secret screen.
 
 use bitcoin::Network;
-use console::{measure_text_width, style, Term};
+use console::{measure_text_width, style, Style, Term};
 use dialoguer::{theme::ColorfulTheme, Input, Select};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-static DISPLAY_NETWORK: Mutex<Network> = Mutex::new(Network::Testnet);
+static DISPLAY_NETWORK: Mutex<Network> = Mutex::new(Network::Bitcoin);
 
-/// Keep every screen honest about which chain this session is using.
 pub fn set_network(network: Network) {
     *DISPLAY_NETWORK.lock().unwrap_or_else(|e| e.into_inner()) = network;
 }
@@ -20,7 +19,17 @@ pub fn display_network() -> Network {
 }
 
 pub fn theme() -> ColorfulTheme {
-    ColorfulTheme::default()
+    ColorfulTheme {
+        prompt_style: Style::new().cyan().bold(),
+        prompt_prefix: style("›".to_string()).cyan().bold(),
+        success_prefix: style("✓".to_string()).green().bold(),
+        error_prefix: style("✗".to_string()).red().bold(),
+        hint_style: Style::new().dim(),
+        active_item_style: Style::new().cyan().bold(),
+        inactive_item_style: Style::new().dim(),
+        active_item_prefix: style("›".to_string()).cyan().bold(),
+        ..ColorfulTheme::default()
+    }
 }
 
 pub fn clear() {
@@ -28,59 +37,67 @@ pub fn clear() {
     print!("\x1b[3J");
 }
 
+/// Compact header: wordmark, version, chain and address format.
 pub fn banner() {
     clear();
+    let width = (Term::stdout().size().1 as usize)
+        .saturating_sub(4)
+        .clamp(34, 64);
     let version = style(format!("v{}", env!("CARGO_PKG_VERSION"))).dim();
-    if display_network() == Network::Bitcoin {
-        println!(
-            "  {}  {}  {}",
-            style("◆ CAIRN").yellow().bold(),
-            style(" MAINNET ").black().on_yellow().bold(),
-            version
-        );
-        println!("  {}", style("─".repeat(52)).yellow().dim());
-        println!(
-            "  {}\n",
-            style("real bitcoin · experimental · source-reviewed").yellow()
-        );
+    let subtitle = style("Bitcoin wallet").dim();
+    let mainnet = display_network() == Network::Bitcoin;
+    let badge = if mainnet {
+        style(" MAINNET ").black().on_yellow().bold()
     } else {
-        println!(
-            "  {}  {}  {}",
-            style("◆ CAIRN").cyan().bold(),
-            style(" TESTNET ").black().on_yellow(),
-            version
-        );
-        println!("  {}", style("─".repeat(52)).cyan().dim());
-        println!(
-            "  {}\n",
-            style("experimental · testnet · no real funds").dim()
-        );
-    }
+        style(" TESTNET ").black().on_cyan().bold()
+    };
+    let format = if mainnet {
+        "Native SegWit · BIP84"
+    } else {
+        "Testnet · Native SegWit · BIP84"
+    };
+
+    println!(
+        "  {}  {}  {}   {}",
+        style("◆").cyan().bold(),
+        style("CAIRN").bold(),
+        version,
+        subtitle
+    );
+    println!("  {}", style("─".repeat(width)).dim());
+    println!("  {}  {}\n", badge, style(format).dim());
 }
 
 pub fn section(title: &str) {
-    println!("{}", style(title).bold());
-    println!("{}", style("─".repeat(title.chars().count().max(20))).dim());
+    println!("  {}", style(title).bold());
+    println!(
+        "  {}",
+        style("─".repeat(measure_text_width(title).max(20))).dim()
+    );
 }
 
 pub fn kv(key: &str, value: &str) {
-    println!("  {:<14}{}", style(key).dim(), value);
+    println!("  {:<16}{}", style(key).dim(), value);
+}
+
+pub fn hint(msg: &str) {
+    println!("  {}", style(msg).dim());
 }
 
 pub fn warn(msg: &str) {
-    println!("{} {}", style("⚠").yellow().bold(), style(msg).yellow());
+    println!("  {} {}", style("!").yellow().bold(), style(msg).yellow());
 }
 
 pub fn info(msg: &str) {
-    println!("{} {}", style("ℹ").cyan().bold(), style(msg).dim());
+    println!("  {} {}", style("·").cyan().bold(), style(msg).dim());
 }
 
 pub fn ok(msg: &str) {
-    println!("{} {}", style("✔").green().bold(), msg);
+    println!("  {} {}", style("✓").green().bold(), msg);
 }
 
 pub fn fail(msg: &str) {
-    println!("{} {}", style("✘").red().bold(), style(msg).red());
+    println!("  {} {}", style("✗").red().bold(), style(msg).red());
 }
 
 pub fn pause() {
@@ -109,7 +126,7 @@ pub fn spin<T>(msg: &str, f: impl FnOnce() -> T) -> T {
             let mut i = 0usize;
             while !done.load(Ordering::Relaxed) {
                 let _ = term.write_str(&format!(
-                    "\r{} {}",
+                    "\r  {} {}",
                     style(frames[i % frames.len()]).cyan(),
                     style(msg).dim()
                 ));
@@ -126,19 +143,33 @@ pub fn spin<T>(msg: &str, f: impl FnOnce() -> T) -> T {
     })
 }
 
-/// Rounded box around lines (ANSI-aware width).
-pub fn boxed(lines: &[String]) {
-    let w = lines
+/// Rounded card with an optional title. Width is ANSI-aware.
+pub fn card(title: &str, lines: &[String]) {
+    let inner = lines
         .iter()
         .map(|l| measure_text_width(l))
         .max()
         .unwrap_or(0)
-        .max(30);
-    println!("╭{}╮", "─".repeat(w + 2));
-    for l in lines {
-        println!("│ {}{} │", l, " ".repeat(w - measure_text_width(l)));
+        .max(24);
+    let top = if title.is_empty() {
+        format!("╭{}╮", "─".repeat(inner + 2))
+    } else {
+        format!(
+            "╭─ {title} {}╮",
+            "─".repeat(inner.saturating_sub(title.chars().count() + 1))
+        )
+    };
+    println!("  {}", style(top).dim());
+    for line in lines {
+        let pad = inner.saturating_sub(measure_text_width(line));
+        println!("  │ {}{} │", line, " ".repeat(pad));
     }
-    println!("╰{}╯", "─".repeat(w + 2));
+    println!("  {}", style(format!("╰{}╯", "─".repeat(inner + 2))).dim());
+}
+
+/// Backwards-compatible plain box.
+pub fn boxed(lines: &[String]) {
+    card("", lines);
 }
 
 /// Show something secret on the terminal's alternate screen so it never

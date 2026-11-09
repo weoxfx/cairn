@@ -8,9 +8,8 @@ Thanks for helping! Security review is the most valuable contribution of all.
 2. **Minimal dependencies.** Every new crate needs a clear reason, and must pass `cargo audit`.
 3. **Secrets never leak.** No logging, printing, clipboard, telemetry or plain-text storage of seeds,
    passwords or keys. Wipe sensitive data when done (`zeroize`).
-4. **Mainnet is experimental.** Testnet stays the default. Keep the short experimental notice and
-   the default-no confirmation when a mainnet wallet is created or imported, and never present
-   mainnet as safe.
+4. **Network correctness.** Mainnet is the default; testnet stays available at creation and import.
+   Never let a wallet talk to another chain's API, and keep the network binding authenticated.
 5. **Tests required** for anything touching keys, signing, fees or the keystore. Prefer official
    test vectors (BIP39, BIP32, BIP84, BIP174). Cover both networks where a path is network-aware.
 
