@@ -18,10 +18,13 @@ Options:
   --from-source  Build from source instead of downloading a release.
 
 Environment:
-  CAIRN_VERSION      Release tag to install, for example v0.2.0.
-  CAIRN_INSTALL_DIR  Directory for the binary (default: ~/.local/bin).
-  CAIRN_SOURCE_REF   Source branch/tag for --from-source (default: master).
-  CAIRN_FROM_SOURCE  Set to 1 for a source build.
+  CAIRN_VERSION          Release tag to install, for example v0.2.0.
+  CAIRN_INSTALL_DIR      Directory for the binary (default: ~/.local/bin).
+  CAIRN_SOURCE_REF       Source branch/tag for --from-source (default: master).
+  CAIRN_FROM_SOURCE      Set to 1 for a source build.
+  CAIRN_MINISIGN_PUBKEY  Minisign public key used to verify SHA256SUMS.
+                         Without it, only the archive checksum is checked and
+                         a warning is printed.
 EOF
 }
 
@@ -74,6 +77,9 @@ case "$os:$arch" in
     Linux:x86_64|Linux:amd64)
         target="x86_64-unknown-linux-musl"
         ;;
+    Linux:aarch64|Linux:arm64)
+        target="aarch64-unknown-linux-gnu"
+        ;;
     Darwin:arm64|Darwin:aarch64)
         target="aarch64-apple-darwin"
         ;;
@@ -81,6 +87,11 @@ case "$os:$arch" in
         target="x86_64-apple-darwin"
         ;;
 esac
+
+# Termux is Android/bionic; the glibc Linux builds do not run there.
+if [ "$termux" -eq 1 ]; then
+    target=""
+fi
 
 install_binary() {
     mkdir -p "$install_dir"
@@ -190,18 +201,43 @@ fi
 
 archive="cairn-${version}-${target}.tar.gz"
 base="https://github.com/$repo/releases/download/$version"
+pubkey="${CAIRN_MINISIGN_PUBKEY:-}"
+
+sha256_check() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        (cd "$tmp" && sha256sum -c "$1")
+    elif command -v shasum >/dev/null 2>&1; then
+        (cd "$tmp" && shasum -a 256 -c "$1")
+    else
+        printf 'error: sha256sum or shasum is required to verify the download\n' >&2
+        exit 1
+    fi
+}
 
 printf 'Downloading %s\n' "$archive"
 curl -fsSL --proto '=https' --tlsv1.2 "$base/$archive" -o "$tmp/$archive"
-curl -fsSL --proto '=https' --tlsv1.2 "$base/$archive.sha256" -o "$tmp/$archive.sha256"
 
-if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$tmp" && sha256sum -c "$archive.sha256")
-elif command -v shasum >/dev/null 2>&1; then
-    (cd "$tmp" && shasum -a 256 -c "$archive.sha256")
+if [ -n "$pubkey" ]; then
+    need minisign
+    printf 'Downloading signed checksum manifest\n'
+    curl -fsSL --proto '=https' --tlsv1.2 "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"
+    curl -fsSL --proto '=https' --tlsv1.2 "$base/SHA256SUMS.minisig" \
+        -o "$tmp/SHA256SUMS.minisig"
+    (cd "$tmp" && minisign -Vm SHA256SUMS -x SHA256SUMS.minisig -P "$pubkey")
+
+    # Verify the archive against the now-trusted manifest.
+    if ! grep "  ${archive}\$" "$tmp/SHA256SUMS" > "$tmp/$archive.manifest.sha256"; then
+        printf 'error: %s is missing from the signed manifest\n' "$archive" >&2
+        exit 1
+    fi
+    sha256_check "$archive.manifest.sha256"
 else
-    printf 'error: sha256sum or shasum is required to verify the download\n' >&2
-    exit 1
+    printf 'warning: CAIRN_MINISIGN_PUBKEY is not set.\n' >&2
+    printf 'warning: the download is checked against an unsigned checksum, not a\n' >&2
+    printf 'warning: signed manifest. Set CAIRN_MINISIGN_PUBKEY to the project key\n' >&2
+    printf 'warning: to verify release authenticity.\n' >&2
+    curl -fsSL --proto '=https' --tlsv1.2 "$base/$archive.sha256" -o "$tmp/$archive.sha256"
+    sha256_check "$archive.sha256"
 fi
 
 tar -xzf "$tmp/$archive" -C "$tmp"

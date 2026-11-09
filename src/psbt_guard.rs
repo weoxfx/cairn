@@ -9,6 +9,11 @@ use bitcoin::psbt::Psbt;
 use bitcoin::EcdsaSighashType;
 use std::collections::HashSet;
 
+/// A review screen must stay reviewable. Real transactions are far smaller;
+/// this also bounds the work done on an untrusted PSBT.
+pub const MAX_PSBT_INPUTS: usize = 500;
+pub const MAX_PSBT_OUTPUTS: usize = 500;
+
 /// Check structure, signedness, previous-transaction consistency and amounts.
 /// Returns `(total_in, total_out)` in sats. Ownership, scripts and keys are
 /// checked by the caller.
@@ -16,6 +21,18 @@ pub fn check_structure(psbt: &Psbt) -> Result<(u64, u64), String> {
     let tx = &psbt.unsigned_tx;
     if psbt.inputs.len() != tx.input.len() || psbt.outputs.len() != tx.output.len() {
         return Err("malformed PSBT: input/output counts do not match the transaction".into());
+    }
+    if tx.input.len() > MAX_PSBT_INPUTS {
+        return Err(format!(
+            "PSBT has too many inputs ({}; limit {MAX_PSBT_INPUTS})",
+            tx.input.len()
+        ));
+    }
+    if tx.output.len() > MAX_PSBT_OUTPUTS {
+        return Err(format!(
+            "PSBT has too many outputs ({}; limit {MAX_PSBT_OUTPUTS})",
+            tx.output.len()
+        ));
     }
 
     let mut total_in = 0u64;

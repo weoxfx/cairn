@@ -30,27 +30,49 @@ pub fn clear() {
 
 pub fn banner() {
     clear();
+    let version = style(format!("v{}", env!("CARGO_PKG_VERSION"))).dim();
     if display_network() == Network::Bitcoin {
         println!(
-            "{}  {}",
+            "  {}  {}  {}",
             style("◆ CAIRN").yellow().bold(),
-            style(" MAINNET ").black().on_yellow().bold()
+            style(" MAINNET ").black().on_yellow().bold(),
+            version
         );
+        println!("  {}", style("─".repeat(52)).yellow().dim());
         println!(
-            "{}\n",
-            style("mainnet · real bitcoin · experimental").yellow()
+            "  {}\n",
+            style("real bitcoin · experimental · source-reviewed").yellow()
         );
     } else {
         println!(
-            "{}  {}",
+            "  {}  {}  {}",
             style("◆ CAIRN").cyan().bold(),
-            style(" TESTNET ").black().on_yellow()
+            style(" TESTNET ").black().on_yellow(),
+            version
         );
+        println!("  {}", style("─".repeat(52)).cyan().dim());
         println!(
-            "{}\n",
+            "  {}\n",
             style("experimental · testnet · no real funds").dim()
         );
     }
+}
+
+pub fn section(title: &str) {
+    println!("{}", style(title).bold());
+    println!("{}", style("─".repeat(title.chars().count().max(20))).dim());
+}
+
+pub fn kv(key: &str, value: &str) {
+    println!("  {:<14}{}", style(key).dim(), value);
+}
+
+pub fn warn(msg: &str) {
+    println!("{} {}", style("⚠").yellow().bold(), style(msg).yellow());
+}
+
+pub fn info(msg: &str) {
+    println!("{} {}", style("ℹ").cyan().bold(), style(msg).dim());
 }
 
 pub fn ok(msg: &str) {

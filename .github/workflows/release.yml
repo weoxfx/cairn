@@ -18,27 +18,40 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             rustflags: "-C target-feature=+crt-static"
+            packages: musl-tools
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            rustflags: "-C linker=aarch64-linux-gnu-gcc"
+            packages: gcc-aarch64-linux-gnu
           - os: macos-26-intel
             target: x86_64-apple-darwin
             rustflags: ""
+            packages: ""
           - os: macos-26
             target: aarch64-apple-darwin
             rustflags: ""
+            packages: ""
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7
         with:
+          toolchain: 1.98.1
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-      - name: Install musl tools
-        if: matrix.target == 'x86_64-unknown-linux-musl'
+      - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a
+      - name: Install build packages
+        if: matrix.packages != ''
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools
+          sudo apt-get install -y ${{ matrix.packages }}
       - name: Build release binary
         env:
-          RUSTFLAGS: ${{ matrix.rustflags }}
-        run: cargo build --locked --release --target "${{ matrix.target }}"
+          MATRIX_RUSTFLAGS: ${{ matrix.rustflags }}
+          SOURCE_DATE_EPOCH: "0"
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+        run: |
+          set -euo pipefail
+          export RUSTFLAGS="$MATRIX_RUSTFLAGS --remap-path-prefix=$PWD=/cairn --remap-path-prefix=$HOME/.cargo=/cargo"
+          cargo build --locked --release --target "${{ matrix.target }}"
       - name: Smoke test
         run: |
           set -euo pipefail
@@ -58,7 +71,7 @@ jobs:
           else
             (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ${{ matrix.target }}
           path: dist/*
@@ -68,8 +81,12 @@ jobs:
     name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
+    env:
+      # Optional: a passwordless minisign secret key. When set, SHA256SUMS is
+      # signed and install.sh can verify it with CAIRN_MINISIGN_PUBKEY.
+      MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           path: dist
           merge-multiple: true
@@ -78,6 +95,17 @@ jobs:
           set -euo pipefail
           cd dist
           cat ./*.sha256 | sort > SHA256SUMS
+      - name: Sign checksum manifest
+        if: env.MINISIGN_SECRET_KEY != ''
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y minisign
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
+          chmod 600 "$RUNNER_TEMP/minisign.key"
+          minisign -S -s "$RUNNER_TEMP/minisign.key" -m dist/SHA256SUMS \
+            -x dist/SHA256SUMS.minisig
+          rm -f "$RUNNER_TEMP/minisign.key"
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}

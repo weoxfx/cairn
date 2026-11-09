@@ -3,7 +3,7 @@
 
 use crate::esplora::{self, Utxo, WalletState};
 use crate::network;
-use crate::ui::{banner, boxed, fmt_btc, menu, ok, pause, spin, theme};
+use crate::ui::{banner, boxed, fmt_btc, menu, ok, pause, short, spin, theme};
 use crate::wallet::{derivation_path, Signer, Watch};
 use bitcoin::absolute::LockTime;
 use bitcoin::address::NetworkUnchecked;
@@ -18,7 +18,7 @@ use bitcoin::{
     ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
 };
 use console::style;
-use dialoguer::Input;
+use dialoguer::{Confirm, Input, MultiSelect};
 use std::collections::{HashMap, HashSet};
 
 const DUST: u64 = 294; // P2WPKH dust threshold in sats
@@ -106,6 +106,24 @@ pub(crate) fn check_fee(fee: u64, amount: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// Wallet-independent fee-rate ceiling. This catches a crafted PSBT that hides
+/// a huge fee behind a large change output, where the percentage check alone
+/// would be too weak (L-01).
+pub(crate) fn check_fee_rate(fee: u64, vsize: u64) -> Result<(), String> {
+    if vsize == 0 {
+        return Err("cannot verify a fee for an empty transaction".into());
+    }
+    let max = (network::MAX_FEE_RATE * vsize as f64).ceil() as u64;
+    if fee > max {
+        return Err(format!(
+            "fee of {fee} sats is above the {:.0} sat/vB ceiling for a {vsize}-vB transaction \
+             (max {max} sats); refusing to continue",
+            network::MAX_FEE_RATE
+        ));
+    }
+    Ok(())
+}
+
 /// Largest-first coin selection. Change below dust goes to the fee (shown on the review screen).
 pub fn plan(
     mut utxos: Vec<Utxo>,
@@ -186,6 +204,54 @@ pub fn plan(
             }
             Err("Not enough confirmed funds for this amount plus the fee".into())
         }
+    }
+}
+
+// ---------- coin control ----------
+
+/// Let the user pick which coins to spend. Returns the selected subset in the
+/// same order as the server supplied it.
+pub fn coin_control(utxos: Vec<Utxo>) -> Result<Vec<Utxo>, String> {
+    if utxos.is_empty() {
+        return Err("No confirmed coins found.".into());
+    }
+    let items: Vec<String> = utxos
+        .iter()
+        .map(|u| {
+            format!(
+                "{}  {:>14}  {}:{}",
+                short(&u.txid.to_string()),
+                fmt_btc(u.value as i64),
+                short(&u.address),
+                u.vout
+            )
+        })
+        .collect();
+    let defaults = vec![true; utxos.len()];
+    let refs: Vec<&str> = items.iter().map(|s| s.as_str()).collect();
+    let picked = MultiSelect::with_theme(&theme())
+        .with_prompt("Select coins to spend (space to toggle, enter to confirm)")
+        .items(&refs)
+        .defaults(&defaults)
+        .interact()
+        .map_err(|e| e.to_string())?;
+    if picked.is_empty() {
+        return Err("No coins selected. Nothing was sent.".into());
+    }
+    Ok(picked.into_iter().map(|i| utxos[i].clone()).collect())
+}
+
+/// Ask whether to use automatic selection or coin control.
+pub fn maybe_coin_control(utxos: Vec<Utxo>) -> Result<Vec<Utxo>, String> {
+    let manual = Confirm::with_theme(&theme())
+        .with_prompt("Choose coins manually? (coin control)")
+        .default(false)
+        .interact()
+        .map_err(|e| e.to_string())?;
+    if manual {
+        coin_control(utxos)
+    } else {
+        Ok(utxos)
     }
 }
 
@@ -409,6 +475,7 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
     if utxos.is_empty() {
         return Err("No confirmed coins found. Wait for confirmations, then Refresh.".into());
     }
+    let utxos = maybe_coin_control(utxos)?;
 
     // Fee choice.
     println!();
@@ -506,6 +573,7 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
     if p.fee < tx.vsize() as u64 {
         return Err("Fee is below the 1 sat/vB relay minimum. Nothing was sent.".into());
     }
+    check_fee_rate(p.fee, tx.vsize() as u64)?;
     let txid = tx.compute_txid().to_string();
     let hex = bitcoin::consensus::encode::serialize_hex(&tx);
 

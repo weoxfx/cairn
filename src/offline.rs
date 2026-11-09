@@ -51,7 +51,8 @@ pub fn create_psbt(wallet: Option<String>, out: Option<String>) -> Result<(), St
     let network = opened.network;
     crate::ui::set_network(network);
     let net = esplora::net_for(network)?;
-    let watch = Watch::from_mnemonic(&opened.mnemonic, network)?;
+    let watch =
+        Watch::from_mnemonic_with_passphrase(&opened.mnemonic, network, &opened.passphrase)?;
     let fp = opened.fingerprint.clone();
     drop(opened);
 
@@ -88,6 +89,7 @@ pub fn create_psbt(wallet: Option<String>, out: Option<String>) -> Result<(), St
     if utxos.is_empty() {
         return Err("No confirmed coins found. Wait for confirmations, then Refresh.".into());
     }
+    let utxos = send::maybe_coin_control(utxos)?;
 
     let rate = prompt_rate(rates)?;
     let change_addr = send::parse_address(&watch.address_at(1, state.next_change)?, network)?;
@@ -156,8 +158,10 @@ pub fn sign_psbt(input: String, out: Option<String>) -> Result<(), String> {
     let opened = crate::unlock_wallet(&name)?;
     let network = opened.network;
     crate::ui::set_network(network);
-    let watch = Watch::from_mnemonic(&opened.mnemonic, network)?;
-    let signer = Signer::from_mnemonic(&opened.mnemonic, network)?;
+    let watch =
+        Watch::from_mnemonic_with_passphrase(&opened.mnemonic, network, &opened.passphrase)?;
+    let signer =
+        Signer::from_mnemonic_with_passphrase(&opened.mnemonic, network, &opened.passphrase)?;
     drop(opened);
 
     let verified = verify_psbt(&psbt, &watch, &signer, network)?;
@@ -173,6 +177,7 @@ pub fn sign_psbt(input: String, out: Option<String>) -> Result<(), String> {
         .clone()
         .extract_tx()
         .map_err(|e| format!("could not finalize transaction: {e}"))?;
+    crate::send::check_fee_rate(verified.fee, tx.vsize() as u64)?;
     let out_path = out.unwrap_or_else(|| signed_path(&input));
     write_psbt(&out_path, &psbt)?;
 
@@ -402,6 +407,9 @@ pub fn broadcast(unsigned_path: String, signed_path: String) -> Result<(), Strin
     let unsigned = read_psbt(&unsigned_path)?;
     let network = psbt_network(&unsigned)?;
     crate::ui::set_network(network);
+    if network == Network::Bitcoin {
+        crate::confirm_mainnet_session()?;
+    }
     banner();
     println!("{}\n", style("Broadcast signed PSBT (online)").bold());
     let net = esplora::net_for(network)?;
@@ -446,6 +454,7 @@ pub fn broadcast(unsigned_path: String, signed_path: String) -> Result<(), Strin
         .clone()
         .extract_tx()
         .map_err(|e| format!("invalid signed transaction: {e}"))?;
+    crate::send::check_fee_rate(fee, tx.vsize() as u64)?;
     if tx.compute_txid() != unsigned.unsigned_tx.compute_txid() {
         return Err("signed transaction does not match the unsigned transaction".into());
     }
@@ -796,6 +805,27 @@ mod tests {
         psbt.unsigned_tx.input.push(txin);
         psbt.inputs.push(input);
         assert!(verify_psbt(&psbt, &watch, &signer, Network::Testnet).is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_psbt_input_and_output_lists() {
+        let (mut psbt, watch, signer) = fixture(Network::Testnet);
+        while psbt.unsigned_tx.output.len() <= crate::psbt_guard::MAX_PSBT_OUTPUTS {
+            let out = psbt.unsigned_tx.output[0].clone();
+            psbt.unsigned_tx.output.push(out);
+            let o = psbt.outputs[0].clone();
+            psbt.outputs.push(o);
+        }
+        assert!(verify_psbt(&psbt, &watch, &signer, Network::Testnet).is_err());
+    }
+
+    #[test]
+    fn fee_rate_ceiling_rejects_hidden_fees() {
+        // The L-01 example: a 900k-sat fee behind a large change output.
+        assert!(crate::send::check_fee_rate(900_000, 141).is_err());
+        assert!(crate::send::check_fee_rate(141_000, 141).is_ok());
+        assert!(crate::send::check_fee_rate(141_001, 141).is_err());
+        assert!(crate::send::check_fee_rate(1, 0).is_err());
     }
 
     #[test]

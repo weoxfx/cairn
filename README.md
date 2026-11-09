@@ -6,46 +6,50 @@ watch-only session and careful sending.
 ## What it does today
 
 - Create, import and open wallets (BIP39, 24 words, native SegWit / BIP84)
+- Optional BIP39 passphrase (25th word), asked before the wallet is created or opened
 - Encrypted wallet file (Argon2id + ChaCha20-Poly1305, authenticated metadata)
 - Balance, transaction list, receive addresses with QR codes
-- Send: address and amount validation, fee choice, full review screen,
+- Send: address and amount validation, fee choice, coin control, full review screen,
   type `SEND` to confirm, password re-entry, then sign and broadcast
 - Offline signing (file or QR transport): build an unsigned PSBT online, sign it on a
   machine with no network, then broadcast it after the online side verifies it
 - Works on Testnet4, Testnet3 and Signet, with provider failover and request pacing
+- Own Esplora server and SOCKS5/Tor support (`CAIRN_API`, `CAIRN_PROXY`, `CAIRN_TOR=1`)
+- Watch-only descriptor export, numeric SeedQR display, and BIP329 transaction labels
+- Machine-readable `--json` output for version, descriptors and labels
 - Mainnet can be chosen when creating or importing a wallet; testnet remains the default
-- Runs on Linux, macOS and Android (Termux)
+- Runs on Linux x86_64/ARM64, macOS and Android (Termux)
 
 ## Mainnet
 
 Cairn is built and tested testnet-first, and testnet remains the default. Mainnet is chosen when
 creating or importing a wallet, without any extra setup. That choice shows a short
-not-third-party-audited notice and asks for confirmation. Opening an existing wallet uses its
-recorded network without another prompt.
+experimental notice and asks for confirmation. Unlocking a mainnet wallet, creating or
+signing a mainnet PSBT, and broadcasting a mainnet transaction each require one typed `MAINNET`
+confirmation per process; the flag resets when Cairn exits.
 
-Mainnet has completed an independent AI-assisted source review but has **not** had a third-party
-audit, and must not be treated as safe for real savings. New wallets record their network, and the
-API layer refuses a testnet wallet pointed at a mainnet server (and the reverse). Use testnet, or a
-hardware/reviewed wallet, for anything you cannot afford to lose.
+Mainnet has completed multiple independent AI-assisted source reviews and remains experimental.
+New wallets record their network, and the API layer refuses a testnet wallet pointed at a mainnet
+server (and the reverse). Use testnet, or a hardware/reviewed wallet, for anything you cannot afford
+to lose.
 
 ## Security design
 
 | Area | What Cairn does |
 |---|---|
 | Seed | 256 bits from the OS random source, shown once on the terminal's alternate screen (no scrollback), then a 3-word backup quiz. Import asks for the hidden phrase twice |
-| Storage | Only the encrypted entropy is saved. Argon2id (128 MB, 3 passes) then ChaCha20-Poly1305. The v2 AAD authenticates network, fingerprint, KDF parameters, salt and nonce. Atomic writes that never follow a symlink, mode 600, `.cairn` kept at 700, symlinked wallet dirs refused, KDF bounds enforced on load. v1 testnet wallets still open |
+| Storage | Only the encrypted entropy is saved. Argon2id (128 MB, 3 passes) then ChaCha20-Poly1305. The v2 AAD authenticates network, fingerprint, KDF parameters, salt and nonce; v3 additionally authenticates whether a BIP39 passphrase is required. The passphrase itself is never stored. Atomic no-replace writes that never follow a symlink, mode 600, `.cairn` kept at 700, symlinked wallet dirs refused, KDF bounds enforced on load. v1/v2 wallets still open |
 | Memory | After unlock only the public account key (xpub) is kept. The decrypted mnemonic and signing keys are held in `mlock`ed allocations when the OS allows it, and erased on drop. Spending keys exist only for the moment of signing |
-| Sending | Re-asks the password, checks the keys match the wallet and each coin, re-fetches each spent coin's creating transaction to compare value/address, checks that the amounts add up, enforces a fee ceiling (10% of the amount, 10k-sat floor, 1M-sat hard cap), uses deterministic (RFC6979) signatures |
-| Offline | `--offline` never opens a socket. It checks that every input belongs to the wallet, has the expected network-specific BIP84 path and script, that change is ours and that the fee clears the relay minimum. PSBT files must be regular files (no FIFOs or symlinks) and signed output is written atomically at mode 600. The online side refuses a signed PSBT that changed any input or output. QR frames are checksummed and then go through the same checks; they are public data, not encrypted |
-| Network | HTTPS-only with certificate checks; redirects are same-origin (host and port) and re-checked, broadcasts refuse them. Response size caps fail closed, with rate pacing, failover and a chain-specific URL guard; userinfo and IPv6 authorities are rejected. Server data is treated as untrusted; UTXO/input/output and balance amounts are bounded, txids are validated, and control characters plus a specific list of invisible Unicode format characters are stripped. History net amounts and heights are display-only and not bounded (L-02); the sanitiser list is not exhaustive (L-03) |
-| Mainnet | Chosen when creating or importing a wallet; testnet remains the default. The choice shows a short not-third-party-audited notice and a default-no confirmation. Opening an existing wallet does not ask again. This is an accident guard, not a third-party audit |
+| Sending | Re-asks the password, checks the keys match the wallet and each coin, re-fetches each spent coin's creating transaction to compare value/address, checks that the amounts add up, offers coin control, enforces a fee ceiling (10% of the amount, 10k-sat floor, 1M-sat hard cap) and a 1,000 sat/vB absolute rate ceiling, uses deterministic (RFC6979) signatures |
+| Offline | `--offline` never opens a socket. It checks that every input belongs to the wallet, has the expected network-specific BIP84 path and script, that change is ours, that the fee clears the relay minimum and the rate ceiling, and caps PSBTs at 500 inputs / 500 outputs. PSBT files must be regular files (no FIFOs or symlinks) and signed output is written atomically at mode 600. The online side refuses a signed PSBT that changed any input or output. QR frames are checksummed and then go through the same checks; they are public data, not encrypted |
+| Network | HTTPS-only with certificate checks; redirects are same-origin (host and port) and re-checked, broadcasts refuse them. Optional SOCKS5/Tor proxy (`CAIRN_PROXY` or `CAIRN_TOR=1`), with DNS resolved by the proxy. Response size caps fail closed, with rate pacing, failover and a chain-specific URL guard; userinfo and IPv6 authorities are rejected. Server data is treated as untrusted; UTXO/input/output/balance/history amounts and block heights are bounded, txids are validated, and server text is reduced to printable ASCII by an allowlist before display |
+| Mainnet | Chosen when creating or importing a wallet; testnet remains the default. Creation shows a short experimental notice and a default-no confirmation. Unlocking, PSBT creation/signing and broadcast require a typed `MAINNET` confirmation once per process. This is an accident guard |
 | Process | No core dumps, umask 077, 5-minute idle lock; non-dumpable on Linux/Android |
 
 Cryptographic primitives come from audited libraries (rust-bitcoin, libsecp256k1, RustCrypto).
 Cairn does not implement its own cryptography. See [SECURITY.md](SECURITY.md) for the threat model,
-known limits and how to report a vulnerability. Internal and independent AI-assisted reviews are
-documented in [SECURITY-REVIEW.md](SECURITY-REVIEW.md); neither is a substitute for a third-party
-audit.
+known limits and how to report a vulnerability. Multiple independent AI-assisted source reviews are
+documented in [SECURITY-REVIEW.md](SECURITY-REVIEW.md).
 
 ## Install
 
@@ -55,7 +59,7 @@ No GitHub release has been published yet, so the current one-line install uses a
 requires Rust and the platform build tools; if a release is published later, the same command uses
 a prebuilt binary on supported platforms.
 
-Linux x86_64, macOS, or Termux/Android:
+Linux x86_64/ARM64, macOS, or Termux/Android:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/weoxfx/cairn/master/install.sh | sh
@@ -69,9 +73,12 @@ curl -fsSL https://raw.githubusercontent.com/weoxfx/cairn/master/install.sh | sh
 ```
 
 The installer downloads a release when one exists, verifies its SHA-256 checksum, and puts `cairn`
-in `~/.local/bin` (Termux: `$PREFIX/bin`; override with `CAIRN_INSTALL_DIR`). Without a release it
-builds from source with `cargo`; if Cargo is missing it prints the exact command for your platform.
-It does not use `sudo`. Download and inspect `install.sh` first if you prefer.
+in `~/.local/bin` (Termux: `$PREFIX/bin`; override with `CAIRN_INSTALL_DIR`). When
+`CAIRN_MINISIGN_PUBKEY` is set it also verifies the signed `SHA256SUMS` manifest before trusting the
+archive; without a key it prints a warning that the checksum is unsigned. Without a release it builds
+from source with `cargo`; if Cargo is missing it prints the exact command for your platform. It does
+not use `sudo`. Download and inspect `install.sh` first if you prefer. See
+[RELEASE-SIGNING.md](RELEASE-SIGNING.md) for key setup and manual verification.
 
 After it finishes, run:
 
@@ -102,6 +109,7 @@ from the [latest release](https://github.com/weoxfx/cairn/releases/latest):
 | Platform | Archive |
 |---|---|
 | Linux x86_64 | `cairn-v*-x86_64-unknown-linux-musl.tar.gz` |
+| Linux ARM64 | `cairn-v*-aarch64-unknown-linux-gnu.tar.gz` |
 | macOS Apple Silicon | `cairn-v*-aarch64-apple-darwin.tar.gz` |
 | macOS Intel | `cairn-v*-x86_64-apple-darwin.tar.gz` |
 
@@ -115,6 +123,14 @@ cd cairn-v*-x86_64-unknown-linux-musl
 ./cairn
 ```
 
+When the release is signed, prefer verifying the signed manifest instead of trusting a checksum
+downloaded from the same place as the archive:
+
+```sh
+minisign -Vm SHA256SUMS -x SHA256SUMS.minisig -P "$CAIRN_MINISIGN_PUBKEY"
+sha256sum -c <(grep '  cairn-v.*x86_64-unknown-linux-musl.tar.gz$' SHA256SUMS)
+```
+
 On macOS use `shasum -a 256 -c ...` instead of `sha256sum -c`. The macOS binaries are unsigned; if
 Gatekeeper blocks one, use Finder's right-click **Open** or clear the quarantine attribute. Put the
 binary on your `PATH` with:
@@ -123,8 +139,8 @@ binary on your `PATH` with:
 install -m 755 cairn ~/.local/bin/cairn
 ```
 
-Prebuilt Android/Termux and ARM Linux binaries are not published yet; the installer falls back to
-the source build, or use the source build below.
+Prebuilt Android/Termux binaries are not published; the installer falls back to the source build, or
+use the source build below.
 
 ### Build from source
 
@@ -190,19 +206,36 @@ The usual PSBT review still happens after scanning.
 - **Network:** Settings in the main menu for Testnet4, Testnet3 and Signet. A wallet's mainnet or
   testnet identity is fixed when it is created or imported.
 - **Your own server:** `export CAIRN_API=https://your-server/testnet/api` (comma separated for several; use a hostname or IPv4 literal, not an IPv6 literal)
+- **Tor / proxy:** `export CAIRN_TOR=1` uses the local Tor SOCKS port (`127.0.0.1:9050`), or
+  `export CAIRN_PROXY=socks5://host:port`. Proxy credentials are redacted in the UI. An invalid
+  proxy setting fails closed instead of silently falling back to a direct connection.
+- **Descriptors:** `cairn --descriptor [WALLET]` prints the BIP84 receive/change watch-only
+  descriptors; add `--json` for machine-readable output. The Info screen also shows them.
+- **SeedQR:** `cairn --seedqr [WALLET]` shows a numeric SeedQR after typing `SHOW`. It reveals the
+  seed, so use it offline and clear the screen afterwards.
+- **Labels:** `cairn --label <TXID> "<label>"` stores a BIP329 `tx` record in
+  `~/.cairn/labels.jsonl`; labels appear in the transaction list.
+
+## JSON output
+
+`--json` currently covers `--version`, `--descriptor` and `--label`. It is intended for scripts and
+integration tests, not for interactive use. Errors still go to stderr as text.
 
 ## Development
 
 ```
-cargo fmt --check
+cargo fmt --check --all
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --release -- --test-threads=1
 cargo audit
+cargo deny check
 ```
 
-Tests include the official BIP39 and BIP84 vectors, keystore tamper/network-relabel tests, signature
-verification, the offline PSBT verify/sign/roundtrip path and QR frame render/scan tests.
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+Tests include the official BIP39 and BIP84 vectors, keystore tamper/network-relabel/passphrase tests,
+signature verification, the offline PSBT verify/sign/roundtrip path, PSBT structure caps, fee-rate
+ceilings, descriptor/passphrase derivation and QR frame render/scan tests. Fuzz targets live in
+`fuzz/` (`url_guard`, `qr_frames`, `psbt`, `keystore`). See [CONTRIBUTING.md](CONTRIBUTING.md) and
+[SUPPLY-CHAIN.md](SUPPLY-CHAIN.md).
 
 ## Releasing
 
@@ -213,8 +246,10 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-The release workflow builds a static Linux x86_64 binary and macOS binaries for Apple Silicon and
-Intel, attaches SHA-256 checksums and creates a GitHub Release.
+The release workflow builds a static Linux x86_64 binary, a Linux ARM64 binary and macOS binaries for
+Apple Silicon and Intel, attaches SHA-256 checksums and creates a GitHub Release. When the
+`MINISIGN_SECRET_KEY` repository secret is configured it also publishes a signed `SHA256SUMS`
+manifest. See [RELEASE-SIGNING.md](RELEASE-SIGNING.md) and [REPRODUCIBLE.md](REPRODUCIBLE.md).
 
 ## Roadmap
 
@@ -223,12 +258,16 @@ Intel, attaches SHA-256 checksums and creates a GitHub Release.
 - [x] Send with review and confirmation
 - [x] Provider failover and rate pacing
 - [x] Offline signer with PSBT and QR transfer (PSBT files and QR images; live camera optional)
-- [x] Experimental mainnet support (independently source-reviewed; no third-party audit)
-- [ ] Optional passphrase (25th word), 2-of-3 multisig
-- [ ] Own-node support (Electrum protocol), Tor
-- [x] Fuzzing harness for URL/redirect, QR frames and PSBT (keystore pending)
-- [x] Independent AI-assisted source review (not a third-party audit)
-- [ ] Reproducible builds and third-party audit (required before recommending mainnet)
+- [x] Experimental mainnet support (independently source-reviewed)
+- [x] Optional BIP39 passphrase (25th word)
+- [x] Own Esplora server, SOCKS5/Tor proxy
+- [x] Watch-only descriptor export, numeric SeedQR, BIP329 labels, `--json`
+- [x] Coin control, fee-rate ceiling, per-session mainnet confirmation
+- [x] Fuzzing harness for URL/redirect, QR frames, PSBT and keystore
+- [x] Pinned GitHub Actions, cargo-deny, reproducible-build CI check, optional signed releases
+- [x] Multiple independent AI-assisted source reviews
+- [ ] 2-of-3 multisig, Electrum protocol, Taproot/BIP86, RBF fee bumping
+- [ ] Windows support and packaged installers
 
 ## License
 

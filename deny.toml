@@ -1,0 +1,47 @@
+# cargo-deny configuration.
+#
+# Run locally with:
+#   cargo deny check
+#
+# CI runs the same command, so a new dependency with an unexpected license,
+# an unmaintained crate or a non-crates.io source fails the build.
+
+[advisories]
+# Treat unmaintained and unsound advisories as failures, not just CVEs.
+version = 2
+ignore = []
+
+[licenses]
+# Only permissive, OSI-approved licenses. This is intentionally a list, not a
+# list of forbidden licenses, so a new license is a deliberate decision.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MITNFA",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = [
+    # No known-malicious or abandoned crypto crates. Add entries with a comment
+    # explaining the reason and a tracking issue.
+]
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

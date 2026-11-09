@@ -12,12 +12,14 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Actions are pinned by commit SHA so a moved tag cannot change what runs.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       # Pinned on purpose: the same compiler must gate every release.
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7
         with:
+          toolchain: 1.98.1
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a
       - run: cargo fmt --check --all
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --release -- --test-threads=1
@@ -25,9 +27,44 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: actions-rust-lang/audit@v1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7
+        with:
+          toolchain: 1.98.1
+      - uses: actions-rust-lang/audit@72c09e02f132669d52284a3323acdb503cfc1a24
         with:
           # Fail on unmaintained/unsound advisories too, not only CVEs.
           args: --deny warnings
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7
+        with:
+          toolchain: 1.98.1
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39
+        with:
+          tool: cargo-deny
+      - run: cargo deny check
+
+  reproducible:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a
+      - name: Build twice and compare
+        env:
+          SOURCE_DATE_EPOCH: "0"
+        run: |
+          set -euo pipefail
+          flags="--remap-path-prefix=$PWD=/cairn --remap-path-prefix=$HOME/.cargo=/cargo"
+          CARGO_TARGET_DIR=target/repro-a RUSTFLAGS="$flags" cargo build --locked --release
+          CARGO_TARGET_DIR=target/repro-b RUSTFLAGS="$flags" cargo build --locked --release
+          a=$(sha256sum target/repro-a/release/cairn | cut -d' ' -f1)
+          b=$(sha256sum target/repro-b/release/cairn | cut -d' ' -f1)
+          printf 'build a: %s\nbuild b: %s\n' "$a" "$b"
+          test "$a" = "$b"

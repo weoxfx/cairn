@@ -54,12 +54,17 @@ pub struct Keystore {
     pub ciphertext: String,
     pub fingerprint: String,
     pub network: String,
+    /// v3 only: whether the wallet uses a BIP39 passphrase. The passphrase
+    /// itself is never stored; it is required again on every unlock.
+    #[serde(default)]
+    pub passphrase: bool,
 }
 
-/// A successfully decrypted wallet. The mnemonic lives in a locked allocation
-/// (best effort) and is zeroized on drop by `bip39`.
+/// A successfully decrypted wallet. The mnemonic and passphrase live in locked
+/// allocations (best effort) and are zeroized on drop.
 pub struct Opened {
     pub mnemonic: Box<Mnemonic>,
+    pub passphrase: Zeroizing<String>,
     pub fingerprint: String,
     pub network: Network,
 }
@@ -108,6 +113,31 @@ fn aad_v2(
         p.parallelism,
         hex::encode(salt),
         hex::encode(nonce)
+    )
+    .into_bytes())
+}
+
+/// v3 binds the presence of a BIP39 passphrase as well as the network. The
+/// passphrase itself is never written to disk; changing the flag makes
+/// decryption fail.
+fn aad_v3(
+    network: Network,
+    fingerprint: &str,
+    p: &KdfParams,
+    salt: &[u8],
+    nonce: &[u8],
+    passphrase: bool,
+) -> Result<Vec<u8>, String> {
+    Ok(format!(
+        "cairn-keystore-v3\nnetwork={}\nfingerprint={fingerprint}\nkdf=argon2id\n\
+         memory_kib={}\niterations={}\nparallelism={}\nsalt={}\nnonce={}\npassphrase={}\n",
+        network_id(network)?,
+        p.memory_kib,
+        p.iterations,
+        p.parallelism,
+        hex::encode(salt),
+        hex::encode(nonce),
+        if passphrase { "true" } else { "false" }
     )
     .into_bytes())
 }
@@ -187,8 +217,18 @@ fn derive_key(password: &str, salt: &[u8], p: &KdfParams) -> Result<Zeroizing<[u
 /// Fingerprint of the master key (public, lets users confirm the right wallet opened).
 /// The fingerprint is a hash of the master public key, so it is the same on every
 /// network; the keystore authenticates the wallet network separately in the AAD.
+#[allow(dead_code)] // compatibility/test entry point; production uses fingerprint_with
 pub fn fingerprint(mnemonic: &Mnemonic, network: Network) -> Result<String, String> {
-    let seed = Zeroizing::new(mnemonic.to_seed(""));
+    fingerprint_with(mnemonic, network, "")
+}
+
+/// Fingerprint for a seed derived with a BIP39 passphrase.
+pub fn fingerprint_with(
+    mnemonic: &Mnemonic,
+    network: Network,
+    passphrase: &str,
+) -> Result<String, String> {
+    let seed = Zeroizing::new(mnemonic.to_seed(passphrase));
     let mut master = Xpriv::new_master(network, seed.as_ref()).map_err(|e| e.to_string())?;
     let secp = Secp256k1::new();
     let fp = master.fingerprint(&secp).to_string();
@@ -196,6 +236,7 @@ pub fn fingerprint(mnemonic: &Mnemonic, network: Network) -> Result<String, Stri
     Ok(fp)
 }
 
+#[allow(dead_code)] // compatibility/test entry point
 pub fn save(
     name: &str,
     password: &str,
@@ -212,6 +253,7 @@ pub fn save(
 }
 
 /// Encrypt entropy with the password and write the wallet file atomically.
+#[allow(dead_code)] // compatibility/test entry point
 pub fn save_with(
     name: &str,
     password: &str,
@@ -219,6 +261,20 @@ pub fn save_with(
     network: Network,
     params: KdfParams,
 ) -> Result<(), String> {
+    save_with_passphrase(name, password, mnemonic, network, None, params)
+}
+
+/// Save a wallet with an optional BIP39 passphrase. A non-empty passphrase
+/// writes a v3 file that requires the same passphrase on every unlock.
+pub fn save_with_passphrase(
+    name: &str,
+    password: &str,
+    mnemonic: &Mnemonic,
+    network: Network,
+    passphrase: Option<&str>,
+    params: KdfParams,
+) -> Result<(), String> {
+    let passphrase = passphrase.filter(|p| !p.is_empty());
     let path = wallet_path(name)?;
     if path.exists() {
         return Err("A wallet with that name already exists".into());
@@ -228,8 +284,13 @@ pub fn save_with(
     let salt = random_bytes::<16>()?;
     let nonce = random_bytes::<12>()?;
     let key = derive_key(password, &salt, &params)?;
-    let fp = fingerprint(mnemonic, network)?;
-    let aad = aad_v2(network, &fp, &params, &salt, &nonce)?;
+    let fp = fingerprint_with(mnemonic, network, passphrase.unwrap_or(""))?;
+    let version = if passphrase.is_some() { 3 } else { 2 };
+    let aad = if version == 3 {
+        aad_v3(network, &fp, &params, &salt, &nonce, true)?
+    } else {
+        aad_v2(network, &fp, &params, &salt, &nonce)?
+    };
 
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_ref()));
     let ciphertext = cipher
@@ -243,7 +304,7 @@ pub fn save_with(
         .map_err(|_| "encryption failed".to_string())?;
 
     let ks = Keystore {
-        version: 2,
+        version,
         kdf: "argon2id".into(),
         kdf_params: params,
         salt: hex::encode(salt),
@@ -251,11 +312,14 @@ pub fn save_with(
         ciphertext: hex::encode(ciphertext),
         fingerprint: fp,
         network: network_id(network)?.into(),
+        passphrase: passphrase.is_some(),
     };
     let json = serde_json::to_vec_pretty(&ks).map_err(|e| e.to_string())?;
 
-    // Temp file (0600) -> fsync -> rename -> fsync directory, so a crash can't corrupt the wallet.
-    // A random suffix keeps concurrent saves from clobbering each other's temp file.
+    // Temp file (0600) -> fsync -> no-replace link -> fsync directory. A hard
+    // link fails atomically if the destination exists, so two concurrent
+    // creations cannot silently replace each other (L-05). A random suffix
+    // keeps concurrent temp files apart.
     let tmp = path.with_extension(format!("{}.tmp", hex::encode(random_bytes::<8>()?)));
     let written = (|| -> Result<(), String> {
         let mut f = OpenOptions::new()
@@ -272,10 +336,15 @@ pub fn save_with(
         let _ = fs::remove_file(&tmp);
         return Err(e);
     }
-    if let Err(e) = fs::rename(&tmp, &path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(e.to_string());
-    }
+    let linked = fs::hard_link(&tmp, &path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            "A wallet with that name already exists".to_string()
+        } else {
+            e.to_string()
+        }
+    });
+    let _ = fs::remove_file(&tmp);
+    linked?;
     if let Some(dir) = path.parent() {
         if let Ok(d) = File::open(dir) {
             let _ = d.sync_all();
@@ -316,10 +385,26 @@ fn read_wallet_file(path: &Path) -> Result<Vec<u8>, String> {
     Ok(data)
 }
 
+/// Whether opening this wallet will require a BIP39 passphrase. This reads only
+/// public header fields; the password is still required to decrypt.
+pub fn requires_passphrase(name: &str) -> Result<bool, String> {
+    let path = wallet_path(name)?;
+    let data = read_wallet_file(&path)?;
+    let ks: Keystore =
+        serde_json::from_slice(&data).map_err(|_| "corrupt wallet file".to_string())?;
+    Ok(ks.version >= 3 && ks.passphrase)
+}
+
+/// Decrypt a wallet without a BIP39 passphrase.
+#[allow(dead_code)] // compatibility/test entry point; production uses open_with
+pub fn open(name: &str, password: &str) -> Result<Opened, String> {
+    open_with(name, password, None)
+}
+
 /// Decrypt a wallet. Returns the mnemonic, fingerprint and authenticated network.
 /// Wrong password, a tampered file and an unsupported format all produce the same
 /// generic error where possible, so the file cannot be used as an oracle.
-pub fn open(name: &str, password: &str) -> Result<Opened, String> {
+pub fn open_with(name: &str, password: &str, passphrase: Option<&str>) -> Result<Opened, String> {
     let path = wallet_path(name)?;
     let data = read_wallet_file(&path)?;
     let ks: Keystore =
@@ -328,6 +413,9 @@ pub fn open(name: &str, password: &str) -> Result<Opened, String> {
         return Err("unsupported wallet version or network".into());
     }
     validate_params(&ks.kdf_params)?;
+
+    let pass = Zeroizing::new(passphrase.unwrap_or("").to_string());
+    let supplied = !pass.is_empty();
 
     let bad = || "wrong password or damaged wallet file".to_string();
     let salt = hex::decode(&ks.salt).map_err(|_| bad())?;
@@ -344,7 +432,7 @@ pub fn open(name: &str, password: &str) -> Result<Opened, String> {
         // v1 existed before mainnet support and was always testnet. Its AAD does
         // not bind the network, so only accept it as testnet.
         1 => {
-            if ks.network != "testnet" {
+            if ks.network != "testnet" || supplied || ks.passphrase {
                 return Err("unsupported wallet version or network".into());
             }
             let plain = cipher
@@ -359,8 +447,38 @@ pub fn open(name: &str, password: &str) -> Result<Opened, String> {
             (plain, Network::Testnet)
         }
         2 => {
+            if supplied || ks.passphrase {
+                return Err("unsupported wallet version or network".into());
+            }
             let network = parse_network(&ks.network)?;
             let aad = aad_v2(network, &ks.fingerprint, &ks.kdf_params, &salt, &nonce)?;
+            let plain = cipher
+                .decrypt(
+                    Nonce::from_slice(&nonce),
+                    Payload {
+                        msg: &ct,
+                        aad: &aad,
+                    },
+                )
+                .map_err(|_| bad())?;
+            (plain, network)
+        }
+        3 => {
+            if !ks.passphrase {
+                return Err("unsupported wallet version or network".into());
+            }
+            if !supplied {
+                return Err("this wallet requires a BIP39 passphrase".into());
+            }
+            let network = parse_network(&ks.network)?;
+            let aad = aad_v3(
+                network,
+                &ks.fingerprint,
+                &ks.kdf_params,
+                &salt,
+                &nonce,
+                true,
+            )?;
             let plain = cipher
                 .decrypt(
                     Nonce::from_slice(&nonce),
@@ -377,7 +495,7 @@ pub fn open(name: &str, password: &str) -> Result<Opened, String> {
 
     let entropy = Zeroizing::new(plain);
     let mnemonic = Box::new(Mnemonic::from_entropy(&entropy).map_err(|_| bad())?);
-    let fp = fingerprint(&mnemonic, network)?;
+    let fp = fingerprint_with(&mnemonic, network, &pass)?;
     if fp != ks.fingerprint {
         return Err(bad());
     }
@@ -385,11 +503,53 @@ pub fn open(name: &str, password: &str) -> Result<Opened, String> {
         mnemonic.as_ref() as *const Mnemonic as *const u8,
         std::mem::size_of::<Mnemonic>(),
     );
+    let opened_pass = if ks.version >= 3 {
+        pass
+    } else {
+        Zeroizing::new(String::new())
+    };
     Ok(Opened {
         mnemonic,
+        passphrase: opened_pass,
         fingerprint: fp,
         network,
     })
+}
+
+/// Fuzzing entry point for the wallet file parser. Enabled only by the
+/// `fuzzing` feature. It exercises JSON, parameter bounds, hex decoding and AAD
+/// construction without running Argon2 (which would make fuzzing far too slow).
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_keystore(data: &[u8]) {
+    let Ok(ks) = serde_json::from_slice::<Keystore>(data) else {
+        return;
+    };
+    let _ = validate_params(&ks.kdf_params);
+    let Ok(salt) = hex::decode(&ks.salt) else {
+        return;
+    };
+    let Ok(nonce) = hex::decode(&ks.nonce) else {
+        return;
+    };
+    let Ok(ct) = hex::decode(&ks.ciphertext) else {
+        return;
+    };
+    if nonce.len() != 12 || !(16..=64).contains(&salt.len()) || ct.is_empty() || ct.len() > 64 {
+        return;
+    }
+    if let Ok(network) = parse_network(&ks.network) {
+        let _ = aad_v2(network, &ks.fingerprint, &ks.kdf_params, &salt, &nonce);
+        let _ = aad_v3(
+            network,
+            &ks.fingerprint,
+            &ks.kdf_params,
+            &salt,
+            &nonce,
+            ks.passphrase,
+        );
+    }
+    let _ = network_id(Network::Testnet);
 }
 
 #[cfg(test)]
@@ -538,6 +698,7 @@ mod tests {
             ciphertext: hex::encode(ct),
             fingerprint: fingerprint(&m, Network::Testnet).unwrap(),
             network: "testnet".into(),
+            passphrase: false,
         };
         fs::create_dir_all(wallet_dir().unwrap()).unwrap();
         fs::write(
@@ -549,6 +710,43 @@ mod tests {
         let opened = open("old", pw).unwrap();
         assert_eq!(opened.network, Network::Testnet);
         assert_eq!(opened.mnemonic.to_string(), m.to_string());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn passphrase_wallet_requires_and_authenticates_passphrase() {
+        let dir = test_home("passphrase");
+        let pw = "a strong wallet password";
+        let pass = "correct horse battery staple";
+        let m = Mnemonic::from_entropy(&[33u8; 32]).unwrap();
+
+        save_with_passphrase("p1", pw, &m, Network::Bitcoin, Some(pass), fast()).unwrap();
+        assert!(requires_passphrase("p1").unwrap());
+
+        let opened = open_with("p1", pw, Some(pass)).unwrap();
+        assert_eq!(opened.network, Network::Bitcoin);
+        assert_eq!(opened.mnemonic.to_string(), m.to_string());
+        assert_eq!(opened.passphrase.as_str(), pass);
+        assert_eq!(
+            opened.fingerprint,
+            fingerprint_with(&m, Network::Bitcoin, pass).unwrap()
+        );
+
+        // The same password with no passphrase, or a wrong passphrase, must fail.
+        assert!(open("p1", pw).is_err());
+        assert!(open_with("p1", pw, Some("wrong passphrase")).is_err());
+        // A v2 wallet must not silently accept a passphrase.
+        save_with("p2", pw, &m, Network::Bitcoin, fast()).unwrap();
+        assert!(!requires_passphrase("p2").unwrap());
+        assert!(open_with("p2", pw, Some(pass)).is_err());
+
+        // Flipping the stored passphrase flag must break authentication.
+        let path = wallet_path("p1").unwrap();
+        let mut ks: Keystore = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        ks.passphrase = false;
+        fs::write(&path, serde_json::to_vec(&ks).unwrap()).unwrap();
+        assert!(open_with("p1", pw, Some(pass)).is_err());
 
         let _ = fs::remove_dir_all(&dir);
     }

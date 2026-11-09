@@ -1,6 +1,7 @@
 mod esplora;
 mod hardening;
 mod keystore;
+mod labels;
 mod network;
 mod offline;
 mod psbt_guard;
@@ -9,11 +10,12 @@ mod send;
 mod ui;
 mod wallet;
 
-use bip39::Mnemonic;
+use bip39::{Language, Mnemonic};
 use bitcoin::Network;
 use console::style;
 use dialoguer::{Confirm, Input, Password};
 use qrcode::{render::unicode, QrCode};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use ui::{banner, boxed, clear, fail, fmt_btc, menu, ok, pause, short, spin, theme};
 use wallet::Watch;
@@ -21,9 +23,9 @@ use zeroize::Zeroizing;
 
 const MIN_PASSWORD_LEN: usize = 12;
 const IDLE_LOCK: Duration = Duration::from_secs(300);
+static MAINNET_SESSION: AtomicBool = AtomicBool::new(false);
 const MAINNET_NOTICE: &str = "\
-Cairn is experimental. An independent AI-assisted source review is complete,
-but it is not a third-party security audit.
+Cairn is experimental and has completed multiple independent AI-assisted source reviews.
 Mainnet uses real bitcoin; testnet is recommended for trying it out.";
 
 fn main() {
@@ -42,7 +44,9 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let json = args.iter().any(|a| a == "--json");
+    args.retain(|a| a != "--json");
     let Some(cmd) = args.first() else {
         return interactive();
     };
@@ -50,6 +54,27 @@ fn run() -> Result<(), String> {
         "-h" | "--help" => {
             help();
             Ok(())
+        }
+        "-V" | "--version" => version(json),
+        "--descriptor" => {
+            let (pos, out) = parse_args(&args[1..])?;
+            if out.is_some() || pos.len() > 1 {
+                return Err("usage: cairn --descriptor [WALLET] [--json]".into());
+            }
+            descriptor(pos.first().cloned(), json)
+        }
+        "--seedqr" => {
+            let (pos, out) = parse_args(&args[1..])?;
+            if out.is_some() || pos.len() > 1 {
+                return Err("usage: cairn --seedqr [WALLET]".into());
+            }
+            seedqr(pos.first().cloned())
+        }
+        "--label" => {
+            if args.len() < 3 {
+                return Err("usage: cairn --label <TXID> <LABEL>".into());
+            }
+            label_tx(&args[1], &args[2..].join(" "), json)
         }
         "--create-psbt" => {
             let (pos, out) = parse_args(&args[1..])?;
@@ -108,6 +133,133 @@ fn parse_args(args: &[String]) -> Result<(Vec<String>, Option<String>), String> 
     Ok((pos, out))
 }
 
+fn version(json: bool) -> Result<(), String> {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"name": "cairn", "version": env!("CARGO_PKG_VERSION")})
+        );
+    } else {
+        println!("cairn {}", env!("CARGO_PKG_VERSION"));
+    }
+    Ok(())
+}
+
+/// Export BIP84 watch-only descriptors for one wallet.
+fn descriptor(wallet: Option<String>, json: bool) -> Result<(), String> {
+    let name = choose_wallet(wallet.as_deref())?;
+    let opened = unlock_wallet(&name)?;
+    let network = opened.network;
+    ui::set_network(network);
+    let watch =
+        Watch::from_mnemonic_with_passphrase(&opened.mnemonic, network, &opened.passphrase)?;
+    let fp = opened.fingerprint.clone();
+    drop(opened);
+    let receive = watch.descriptor(0)?;
+    let change = watch.descriptor(1)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "wallet": name,
+                "network": network::label(network),
+                "fingerprint": fp,
+                "descriptors": {"receive": receive, "change": change},
+            })
+        );
+    } else {
+        banner();
+        println!("{}\n", style("Watch-only descriptors (BIP84)").bold());
+        println!("  Wallet:      {name}");
+        println!("  Network:     {}", network::label(network));
+        println!("  Fingerprint: {fp}\n");
+        println!("  Receive: {}", style(receive).cyan());
+        println!("  Change:  {}", style(change).cyan());
+        println!(
+            "\n{}",
+            style("  These descriptors can see every address and balance, but cannot spend.")
+                .yellow()
+        );
+    }
+    Ok(())
+}
+
+/// Numeric SeedQR payload: each BIP39 word as a 4-digit index (1..=2048).
+fn numeric_seedqr(mnemonic: &Mnemonic) -> Result<Zeroizing<String>, String> {
+    let words = Language::English.word_list();
+    let mut out = Zeroizing::new(String::with_capacity(24 * 4));
+    for word in mnemonic.words() {
+        let idx = words
+            .iter()
+            .position(|w| *w == word)
+            .ok_or("seed word is not in the English BIP39 list")?
+            + 1;
+        out.push_str(&format!("{idx:04}"));
+    }
+    Ok(out)
+}
+
+/// Display a numeric SeedQR on the alternate screen. This reveals the seed, so
+/// it is never written to disk and is wiped from the screen afterwards.
+fn seedqr(wallet: Option<String>) -> Result<(), String> {
+    let name = choose_wallet(wallet.as_deref())?;
+    let opened = unlock_wallet(&name)?;
+    let network = opened.network;
+    ui::set_network(network);
+    let payload = numeric_seedqr(&opened.mnemonic)?;
+    drop(opened);
+
+    let answer: String = Input::with_theme(&theme())
+        .with_prompt("Type SHOW to display your SeedQR (anything else cancels)")
+        .allow_empty(true)
+        .interact_text()
+        .map_err(|e| e.to_string())?;
+    if answer.trim() != "SHOW" {
+        println!("\nCancelled. Nothing was shown.");
+        return Ok(());
+    }
+
+    let code = QrCode::new(payload.as_bytes()).map_err(|e| e.to_string())?;
+    let art = Zeroizing::new(
+        code.render::<unicode::Dense1x2>()
+            .dark_color(unicode::Dense1x2::Light)
+            .light_color(unicode::Dense1x2::Dark)
+            .build(),
+    );
+    ui::secret_screen(|| {
+        banner();
+        println!("{}", style("NUMERIC SEEDQR — YOUR SEED").red().bold());
+        println!(
+            "{}",
+            style("Scan only with a trusted offline device. This screen leaves no scrollback.")
+                .yellow()
+        );
+        println!("\n{}\n", art.as_str());
+        println!(
+            "{}",
+            style("Anyone who photographs this can take your coins.")
+                .red()
+                .bold()
+        );
+        pause();
+    });
+    Ok(())
+}
+
+fn label_tx(txid: &str, label: &str, json: bool) -> Result<(), String> {
+    let mut labels = labels::Labels::load()?;
+    labels.set(txid, label)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"type": "tx", "ref": txid, "label": label})
+        );
+    } else {
+        ok(&format!("Labelled {} as '{}'", short(txid), label));
+    }
+    Ok(())
+}
+
 fn help() {
     println!(
         "\
@@ -123,7 +275,19 @@ Usage:
   cairn --qr-show <FILE.psbt>                Show a PSBT as QR frame(s)
   cairn --qr-scan [--out FILE.psbt] <IMAGE>...
                                              Rebuild a PSBT from QR photos
-  cairn --help                               Show this help"
+  cairn --descriptor [WALLET] [--json]       Export BIP84 watch-only descriptors
+  cairn --seedqr [WALLET]                    Show a numeric SeedQR (reveals seed)
+  cairn --label <TXID> <LABEL> [--json]      Store a BIP329 transaction label
+  cairn --version [--json]                   Show the version
+  cairn --help                               Show this help
+
+Global:
+  --json                                     Machine-readable output where supported
+
+Environment:
+  CAIRN_API=https://your-server/api          Use your own Esplora server
+  CAIRN_PROXY=socks5://127.0.0.1:9050        Route API traffic through a proxy
+  CAIRN_TOR=1                                Shorthand for the local Tor SOCKS port"
     );
 }
 
@@ -142,6 +306,29 @@ pub(crate) fn confirm_mainnet() -> Result<(), String> {
         ui::set_network(Network::Testnet);
         return Err("Mainnet session cancelled.".into());
     }
+    MAINNET_SESSION.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+/// One typed confirmation per process before any mainnet wallet is unlocked,
+/// PSBT is created/signed, or transaction is broadcast (M-02). The flag is
+/// process-local and resets when Cairn exits.
+pub(crate) fn confirm_mainnet_session() -> Result<(), String> {
+    if MAINNET_SESSION.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    ui::set_network(Network::Bitcoin);
+    banner();
+    println!("{}\n", style(MAINNET_NOTICE).yellow());
+    let answer: String = Input::with_theme(&theme())
+        .with_prompt("Type MAINNET to use real bitcoin in this session")
+        .allow_empty(true)
+        .interact_text()
+        .map_err(|e| e.to_string())?;
+    if answer.trim() != "MAINNET" {
+        return Err("Mainnet session not confirmed. Nothing was done.".into());
+    }
+    MAINNET_SESSION.store(true, Ordering::SeqCst);
     Ok(())
 }
 
@@ -227,6 +414,33 @@ fn ask_new_password() -> Result<Zeroizing<String>, String> {
     Ok(pw)
 }
 
+/// Optional BIP39 passphrase. It is never stored: losing it loses the wallet,
+/// and every unlock must re-enter it. This is separate from the file password.
+fn ask_passphrase() -> Result<Option<Zeroizing<String>>, String> {
+    let add = Confirm::with_theme(&theme())
+        .with_prompt("Add a BIP39 passphrase? (advanced; default no)")
+        .default(false)
+        .interact()
+        .map_err(|e| e.to_string())?;
+    if !add {
+        return Ok(None);
+    }
+    println!(
+        "{}",
+        style("  The passphrase is never stored. If you lose it, the wallet is unrecoverable.")
+            .yellow()
+    );
+    let pass = Password::with_theme(&theme())
+        .with_prompt("BIP39 passphrase")
+        .with_confirmation("Repeat passphrase", "Passphrases don't match")
+        .interact()
+        .map_err(|e| e.to_string())?;
+    if pass.is_empty() {
+        return Err("An empty passphrase is the same as no passphrase. Nothing was saved.".into());
+    }
+    Ok(Some(Zeroizing::new(pass)))
+}
+
 // ---------- create / import / open ----------
 
 /// Testnet is the recommended default. Mainnet is always available and still
@@ -251,6 +465,7 @@ fn create_wallet() -> Result<(), String> {
     ui::set_network(network);
     let name = ask_name()?;
     let password = ask_new_password()?;
+    let passphrase = ask_passphrase()?;
 
     // 256 bits of OS randomness -> 24 words.
     let entropy = Zeroizing::new(keystore::random_bytes::<32>()?);
@@ -308,9 +523,20 @@ fn create_wallet() -> Result<(), String> {
     }
 
     spin("Encrypting wallet…", || {
-        keystore::save(&name, &password, &mnemonic, network)
+        keystore::save_with_passphrase(
+            &name,
+            &password,
+            &mnemonic,
+            network,
+            passphrase.as_ref().map(|p| p.as_str()),
+            keystore::KdfParams::default_strong(),
+        )
     })?;
-    let fp = keystore::fingerprint(&mnemonic, network)?;
+    let fp = keystore::fingerprint_with(
+        &mnemonic,
+        network,
+        passphrase.as_ref().map(|p| p.as_str()).unwrap_or(""),
+    )?;
     banner();
     ok(&format!("Wallet '{}' created", style(&name).bold()));
     println!("  Fingerprint: {fp}");
@@ -347,12 +573,24 @@ fn import_wallet() -> Result<(), String> {
     let mnemonic =
         Mnemonic::parse(phrase.trim()).map_err(|e| format!("Invalid seed phrase: {e}"))?;
     let password = ask_new_password()?;
+    let passphrase = ask_passphrase()?;
     spin("Encrypting wallet…", || {
-        keystore::save(&name, &password, &mnemonic, network)
+        keystore::save_with_passphrase(
+            &name,
+            &password,
+            &mnemonic,
+            network,
+            passphrase.as_ref().map(|p| p.as_str()),
+            keystore::KdfParams::default_strong(),
+        )
     })?;
     ok(&format!(
         "Imported. Fingerprint: {}",
-        keystore::fingerprint(&mnemonic, network)?
+        keystore::fingerprint_with(
+            &mnemonic,
+            network,
+            passphrase.as_ref().map(|p| p.as_str()).unwrap_or(""),
+        )?
     ));
     pause();
     Ok(())
@@ -386,6 +624,7 @@ pub(crate) fn unlock_wallet_with(
     expected_fp: Option<&str>,
     prompt: &str,
 ) -> Result<keystore::Opened, String> {
+    let needs_passphrase = keystore::requires_passphrase(name)?;
     // Growing delay after each wrong attempt, 5 tries max.
     let mut unlocked = None;
     for attempt in 0..5u32 {
@@ -395,13 +634,29 @@ pub(crate) fn unlock_wallet_with(
                 .interact()
                 .map_err(|e| e.to_string())?,
         );
-        match spin("Unlocking…", || keystore::open(name, &pw)) {
+        let passphrase = if needs_passphrase {
+            Some(Zeroizing::new(
+                Password::with_theme(&theme())
+                    .with_prompt("BIP39 passphrase (hidden)")
+                    .interact()
+                    .map_err(|e| e.to_string())?,
+            ))
+        } else {
+            None
+        };
+        let opened = spin("Unlocking…", || {
+            keystore::open_with(name, &pw, passphrase.as_ref().map(|p| p.as_str()))
+        });
+        match opened {
             Ok(opened) => {
                 if expected_fp
                     .map(|fp| opened.fingerprint.as_str() != fp)
                     .unwrap_or(false)
                 {
                     return Err("Wallet fingerprint changed. Nothing was signed.".into());
+                }
+                if opened.network == Network::Bitcoin {
+                    confirm_mainnet_session()?;
                 }
                 unlocked = Some(opened);
                 break;
@@ -423,7 +678,8 @@ fn open_wallet() -> Result<(), String> {
     let network = opened.network;
     ui::set_network(network);
     // Keep only the public account key; the seed is wiped from memory right here.
-    let watch = Watch::from_mnemonic(&opened.mnemonic, network)?;
+    let watch =
+        Watch::from_mnemonic_with_passphrase(&opened.mnemonic, network, &opened.passphrase)?;
     let fp = opened.fingerprint.clone();
     drop(opened);
     dashboard(&name, &fp, &watch)
@@ -480,6 +736,15 @@ fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
                             .to_string(),
                     );
                 }
+                lines.push(
+                    style(format!(
+                        "{} address(es) used · next receive #{}",
+                        s.used.len(),
+                        s.next_receive
+                    ))
+                    .dim()
+                    .to_string(),
+                );
                 if let Some(t) = synced_at {
                     lines.push(
                         style(format!("updated {}s ago", t.elapsed().as_secs()))
@@ -501,8 +766,11 @@ fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
                 style("not synced (choose Refresh)").yellow().to_string(),
             ]),
         }
+        if let Some(p) = esplora::proxy_desc() {
+            ui::info(&format!("proxy: {p}"));
+        }
         if let Some(e) = &last_err {
-            println!("{}", style(format!("  {e}")).dim());
+            ui::warn(e);
         }
         println!();
         let asked = Instant::now();
@@ -640,32 +908,76 @@ fn transactions_screen(
     };
     if s.used.is_empty() {
         println!("  No transactions yet.");
-    } else {
-        match spin("Loading transactions…", || {
-            esplora::transactions(esplora::net_for(network)?, s)
-        }) {
-            Ok(txs) => {
-                if txs.is_empty() {
-                    println!("  No transactions yet.");
-                }
-                for t in txs.iter().take(15) {
-                    let (icon, amount) = if t.net >= 0 {
-                        (
-                            style("↙").green(),
-                            style(format!("+{}", fmt_btc(t.net))).green().bold(),
-                        )
-                    } else {
-                        (style("↗").red(), style(fmt_btc(t.net)).red().bold())
-                    };
-                    let status = match t.height {
-                        Some(h) => style(format!("block {h}")).dim(),
-                        None => style("pending".to_string()).yellow(),
-                    };
-                    println!("  {} {}  {}", icon, amount, status);
-                    println!("    {}\n", style(short(&t.txid)).dim());
-                }
+        println!();
+        pause();
+        return Ok(());
+    }
+    let txs = match spin("Loading transactions…", || {
+        esplora::transactions(esplora::net_for(network)?, s)
+    }) {
+        Ok(txs) => txs,
+        Err(e) => {
+            fail(&e);
+            println!();
+            pause();
+            return Ok(());
+        }
+    };
+    if txs.is_empty() {
+        println!("  No transactions yet.");
+        println!();
+        pause();
+        return Ok(());
+    }
+    let mut labels = labels::Labels::load().unwrap_or_else(|_| labels::Labels::empty());
+    for t in txs.iter().take(15) {
+        let (icon, amount) = if t.net >= 0 {
+            (
+                style("↙").green(),
+                style(format!("+{}", fmt_btc(t.net))).green().bold(),
+            )
+        } else {
+            (style("↗").red(), style(fmt_btc(t.net)).red().bold())
+        };
+        let status = match t.height {
+            Some(h) => style(format!("block {h}")).dim(),
+            None => style("pending".to_string()).yellow(),
+        };
+        let label = labels
+            .get(&t.txid)
+            .map(|l| format!("  {}", style(l).magenta()))
+            .unwrap_or_default();
+        println!("  {} {}  {}{}", icon, amount, status, label);
+        println!("    {}\n", style(short(&t.txid)).dim());
+    }
+
+    // BIP329 labels are local-only metadata; they are never sent to a server.
+    let mut items: Vec<String> = txs
+        .iter()
+        .take(15)
+        .map(|t| format!("Label {}", short(&t.txid)))
+        .collect();
+    items.push("Back".to_string());
+    let refs: Vec<&str> = items.iter().map(|s| s.as_str()).collect();
+    if let Ok(i) = menu(&refs) {
+        if i < txs.len().min(15) {
+            let txid = txs[i].txid.clone();
+            let current = labels.get(&txid).unwrap_or("").to_string();
+            let label: String = Input::with_theme(&theme())
+                .with_prompt("Label (empty removes)")
+                .with_initial_text(current)
+                .allow_empty(true)
+                .interact_text()
+                .map_err(|e| e.to_string())?;
+            let result = if label.trim().is_empty() {
+                labels.remove(&txid)
+            } else {
+                labels.set(&txid, &label)
+            };
+            match result {
+                Ok(()) => ok("Label saved (BIP329, local only)"),
+                Err(e) => fail(&e),
             }
-            Err(e) => fail(&e),
         }
     }
     println!();
@@ -676,25 +988,34 @@ fn transactions_screen(
 fn info_screen(fp: &str, watch: &Watch) -> Result<(), String> {
     let net = esplora::net_for(watch.network())?;
     banner();
-    println!("{}\n", style("Wallet Info").bold());
-    println!("  Fingerprint:   {fp}");
-    println!("  Address type:  native SegWit (BIP84)");
-    println!(
-        "  Network:       {} (wallet: {})",
-        net.label(),
-        network::label(watch.network())
+    ui::section("Wallet Info");
+    println!();
+    ui::kv("Fingerprint", fp);
+    ui::kv("Address type", "native SegWit (BIP84)");
+    ui::kv(
+        "Network",
+        &format!(
+            "{} (wallet: {})",
+            net.label(),
+            network::label(watch.network())
+        ),
     );
-    println!("  API servers:   {}", esplora::providers_desc(net));
-    println!(
-        "  Seed in memory: {}",
-        style("no (wiped after unlock)").green()
+    ui::kv("API servers", &esplora::providers_desc(net));
+    ui::kv(
+        "Proxy",
+        &esplora::proxy_desc().unwrap_or_else(|| "off (direct connection)".into()),
     );
-    println!("  Idle lock:     5 minutes");
+    ui::kv("Seed in memory", "no (wiped after unlock)");
+    ui::kv("Idle lock", "5 minutes");
     println!("\n  Account xpub (watch-only; can see balance, cannot spend):");
     println!("  {}", style(watch.xpub_string()).cyan());
+    println!("\n  Watch-only descriptors (BIP84):");
+    println!("  Receive: {}", style(watch.descriptor(0)?).cyan());
+    println!("  Change:  {}", style(watch.descriptor(1)?).cyan());
     println!(
         "\n{}",
-        style("  Anyone with the xpub can see all your addresses and balance.").yellow()
+        style("  Anyone with the xpub or descriptors can see all your addresses and balance.")
+            .yellow()
     );
     println!(
         "{}\n",
@@ -721,8 +1042,16 @@ fn settings() -> Result<(), String> {
             style(esplora::providers_desc(current)).dim()
         );
         println!(
+            "  Proxy:       {}",
+            style(esplora::proxy_desc().unwrap_or_else(|| "off (direct connection)".into())).dim()
+        );
+        println!(
             "{}\n",
-            style("  Set CAIRN_API=https://your-server/api to use your own server.").dim()
+            style(
+                "  Set CAIRN_API=https://your-server/api for your own node, or \
+                 CAIRN_TOR=1 / CAIRN_PROXY=socks5://host:port for Tor."
+            )
+            .dim()
         );
         let nets = esplora::selectable_nets();
         let items: Vec<String> = nets

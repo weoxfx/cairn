@@ -32,4 +32,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "keystore"
+path = "fuzz_targets/keystore.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

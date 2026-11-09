@@ -28,6 +28,8 @@ const MAX_UTXOS_PER_ADDRESS: usize = 10_000; // reject absurd server responses
 const MAX_UTXOS_TOTAL: usize = 20_000;
 const MAX_PREVOUT_TXIDS: usize = 100; // bound extra verification requests
 const MAX_TX_SUMMARIES: usize = 100_000;
+const MAX_HISTORY_VALUE: i64 = network::MAX_MONEY_SATS as i64;
+const MAX_BLOCK_HEIGHT: u64 = 10_000_000; // far above any plausible chain tip
 const COOLDOWN: Duration = Duration::from_secs(60);
 const MIN_GAP: Duration = Duration::from_millis(200); // at most ~5 requests/second overall
 
@@ -122,6 +124,16 @@ fn config_path() -> Option<std::path::PathBuf> {
         .map(|h| std::path::PathBuf::from(h).join(".cairn").join("config"))
 }
 
+/// Only testnet names are accepted from the config file. Mainnet is bound to a
+/// wallet, never to a global setting, so an old `Mainnet` value is ignored
+/// instead of making every testnet wallet fail its network/API check.
+fn config_net(s: &str) -> Option<Net> {
+    Net::TESTNETS
+        .iter()
+        .find(|n| n.label().eq_ignore_ascii_case(s.trim()))
+        .copied()
+}
+
 pub fn load_config() {
     if let Some(p) = config_path() {
         // The config is a single network name. Refuse symlinks and special
@@ -141,13 +153,8 @@ pub fn load_config() {
         if small {
             let mut s = String::new();
             if f.take(1025).read_to_string(&mut s).is_ok() {
-                let mut all = Net::TESTNETS.to_vec();
-                all.insert(0, Net::Mainnet);
-                if let Some(n) = all
-                    .iter()
-                    .find(|n| n.label().eq_ignore_ascii_case(s.trim()))
-                {
-                    *NET.lock().unwrap_or_else(|e| e.into_inner()) = *n;
+                if let Some(n) = config_net(&s) {
+                    *NET.lock().unwrap_or_else(|e| e.into_inner()) = n;
                 }
             }
         }
@@ -203,10 +210,47 @@ fn mark_cooling(p: &str) {
 
 // ---------- HTTP with failover ----------
 
-fn agent() -> &'static ureq::Agent {
-    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        ureq::AgentBuilder::new()
+/// Optional SOCKS5/Tor proxy. `CAIRN_PROXY` wins; `CAIRN_TOR=1` is shorthand
+/// for the standard local Tor SOCKS port. DNS is resolved by the proxy for
+/// hostnames, so an own-node hostname is not leaked to the local resolver.
+fn proxy_from_values(proxy: Option<&str>, tor: Option<&str>) -> Option<String> {
+    if let Some(v) = proxy {
+        let v = v.trim();
+        if !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+    match tor {
+        Some("1") | Some("true") | Some("yes") => Some("socks5://127.0.0.1:9050".into()),
+        _ => None,
+    }
+}
+
+fn proxy_setting() -> Option<String> {
+    proxy_from_values(
+        std::env::var("CAIRN_PROXY").ok().as_deref(),
+        std::env::var("CAIRN_TOR").ok().as_deref(),
+    )
+}
+
+/// Human-readable proxy description with credentials removed.
+fn proxy_desc_for(p: &str) -> String {
+    if let Some(at) = p.rfind('@') {
+        let scheme = p.split("://").next().unwrap_or("proxy");
+        format!("{scheme}://***@{}", &p[at + 1..])
+    } else {
+        p.to_string()
+    }
+}
+
+pub fn proxy_desc() -> Option<String> {
+    proxy_setting().map(|p| proxy_desc_for(&p))
+}
+
+fn agent() -> Result<&'static ureq::Agent, String> {
+    static AGENT: OnceLock<Result<ureq::Agent, String>> = OnceLock::new();
+    let built = AGENT.get_or_init(|| {
+        let mut builder = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(10))
             .timeout_read(Duration::from_secs(30))
             .timeout(Duration::from_secs(45))
@@ -217,34 +261,28 @@ fn agent() -> &'static ureq::Agent {
             ))
             .https_only(true) // refuse http outright
             .redirects(0) // redirects are followed manually below, same host only
-            .max_idle_connections(0) // fresh connection each time: no stale pooled sockets
-            .build()
-    })
+            .max_idle_connections(0); // fresh connection each time: no stale pooled sockets
+        if let Some(p) = proxy_setting() {
+            // A configured privacy proxy must never be silently ignored: an
+            // invalid value fails closed before any request is made.
+            let proxy = ureq::Proxy::new(&p)
+                .map_err(|e| format!("invalid CAIRN_PROXY/CAIRN_TOR setting: {e}"))?;
+            builder = builder.proxy(proxy);
+        }
+        Ok(builder.build())
+    });
+    built.as_ref().map_err(|e| e.clone())
 }
 
-/// Server-controlled text is untrusted: strip terminal control characters and
-/// bound it before it can reach the screen.
+/// Server-controlled text is untrusted. This is an allowlist, not a denylist:
+/// only printable ASCII (and spaces) can reach the screen, so no future Unicode
+/// control, bidi, zero-width, line-breaking or terminal-escape character can
+/// slip through. The result is also bounded by character count.
 fn safe_text(s: &str, max_chars: usize) -> String {
     s.chars()
-        .filter(|c| !c.is_control() && !is_invisible(*c))
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
         .take(max_chars)
         .collect()
-}
-
-/// Bidi overrides, zero-width characters and other format controls can reorder
-/// or hide terminal text even though `is_control()` does not catch them.
-fn is_invisible(c: char) -> bool {
-    matches!(
-        c,
-        '\u{00AD}'
-            | '\u{061C}'
-            | '\u{200B}'..='\u{200F}'
-            | '\u{202A}'..='\u{202E}'
-            | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{206F}'
-            | '\u{FEFF}'
-            | '\u{FFF9}'..='\u{FFFB}'
-    )
 }
 
 fn read_body(resp: ureq::Response) -> Result<String, String> {
@@ -336,7 +374,7 @@ enum GetStep {
 }
 
 fn one_get(url: &str) -> Result<GetStep, String> {
-    match agent().get(url).call() {
+    match agent()?.get(url).call() {
         Ok(resp) if is_redirect(resp.status()) => Ok(GetStep::Redirect(redirect_target(&resp)?)),
         Ok(resp) => Ok(GetStep::Body(read_body(resp)?)),
         Err(ureq::Error::Status(code, resp)) if is_redirect(code) => {
@@ -387,7 +425,7 @@ fn http_get(net: Net, url: &str) -> Result<String, String> {
 
 fn http_post(url: &str, body: &str) -> Result<String, String> {
     pace();
-    match agent()
+    match agent()?
         .post(url)
         .set("Content-Type", "text/plain")
         .send_string(body)
@@ -729,23 +767,42 @@ pub struct TxSummary {
     pub height: Option<u64>,
 }
 
-fn net_for_tx(tx: &Value, ours: &HashSet<String>) -> i64 {
-    let mut net = 0i64;
+/// History is display-only, but it must still be bounded: a malicious provider
+/// could otherwise print impossible amounts or heights. Every value is checked
+/// against the 21M BTC supply and the running total is kept in range.
+fn net_for_tx(tx: &Value, ours: &HashSet<String>) -> Result<i64, String> {
+    let mut net: i64 = 0;
+    let mut add = |value: &Value, sign: i64| -> Result<(), String> {
+        let v = value
+            .as_u64()
+            .ok_or("server returned a non-numeric history value")?;
+        if v > network::MAX_MONEY_SATS {
+            return Err("server returned an impossible history amount".into());
+        }
+        let delta = i64::try_from(v).map_err(|_| "history amount overflow")?;
+        net = net
+            .checked_add(sign * delta)
+            .ok_or("history amount overflow")?;
+        if !(-MAX_HISTORY_VALUE..=MAX_HISTORY_VALUE).contains(&net) {
+            return Err("server returned an impossible history total".into());
+        }
+        Ok(())
+    };
     for o in tx["vout"].as_array().into_iter().flatten() {
         if let Some(a) = o["scriptpubkey_address"].as_str() {
             if ours.contains(a) {
-                net = net.saturating_add(o["value"].as_i64().unwrap_or(0));
+                add(&o["value"], 1)?;
             }
         }
     }
     for i in tx["vin"].as_array().into_iter().flatten() {
         if let Some(a) = i["prevout"]["scriptpubkey_address"].as_str() {
             if ours.contains(a) {
-                net = net.saturating_sub(i["prevout"]["value"].as_i64().unwrap_or(0));
+                add(&i["prevout"]["value"], -1)?;
             }
         }
     }
-    net
+    Ok(net)
 }
 
 pub fn transactions(net: Net, state: &WalletState) -> Result<Vec<TxSummary>, String> {
@@ -768,7 +825,13 @@ pub fn transactions(net: Net, state: &WalletState) -> Result<Vec<TxSummary>, Str
                     return Err("server returned too many transactions".into());
                 }
                 let height = if tx["status"]["confirmed"].as_bool().unwrap_or(false) {
-                    tx["status"]["block_height"].as_u64()
+                    let h = tx["status"]["block_height"]
+                        .as_u64()
+                        .ok_or("confirmed transaction has no block height")?;
+                    if h > MAX_BLOCK_HEIGHT {
+                        return Err("server returned an impossible block height".into());
+                    }
+                    Some(h)
                 } else {
                     None
                 };
@@ -776,7 +839,7 @@ pub fn transactions(net: Net, state: &WalletState) -> Result<Vec<TxSummary>, Str
                     txid.clone(),
                     TxSummary {
                         txid,
-                        net: net_for_tx(tx, &ours),
+                        net: net_for_tx(tx, &ours)?,
                         height,
                     },
                 );
@@ -1216,6 +1279,76 @@ mod tests {
         assert_eq!(safe_text("abcdef", 3), "abc");
         // Bidi overrides and zero-width characters must not spoof the display.
         assert_eq!(safe_text("a\u{202E}b\u{200B}c\u{FEFF}", 64), "abc");
+        // The allowlist also drops every non-ASCII character, including
+        // line separators, Unicode tags and variation selectors.
+        assert_eq!(safe_text("ok\u{2028}\u{2029}\u{E0041}\u{FE0F}✓", 64), "ok");
+    }
+
+    #[test]
+    fn history_values_and_heights_are_bounded() {
+        let mut ours = HashSet::new();
+        ours.insert("tb1qme".to_string());
+        let tx = serde_json::json!({
+            "vout": [{"value": 50_000, "scriptpubkey_address": "tb1qme"}],
+            "vin": [{"prevout": {"value": 20_000, "scriptpubkey_address": "tb1qme"}}]
+        });
+        assert_eq!(net_for_tx(&tx, &ours).unwrap(), 30_000);
+
+        // A value above the 21M BTC supply is rejected.
+        let too_big = serde_json::json!({
+            "vout": [{"value": network::MAX_MONEY_SATS + 1, "scriptpubkey_address": "tb1qme"}],
+            "vin": []
+        });
+        assert!(net_for_tx(&too_big, &ours).is_err());
+
+        // Missing or non-numeric values are not silently treated as zero.
+        let missing = serde_json::json!({
+            "vout": [{"scriptpubkey_address": "tb1qme"}],
+            "vin": []
+        });
+        assert!(net_for_tx(&missing, &ours).is_err());
+
+        // The running total cannot exceed the supply even with many outputs.
+        let many: Vec<serde_json::Value> = (0..3)
+            .map(|_| {
+                serde_json::json!({
+                    "value": network::MAX_MONEY_SATS,
+                    "scriptpubkey_address": "tb1qme"
+                })
+            })
+            .collect();
+        let overflow = serde_json::json!({ "vout": many, "vin": [] });
+        assert!(net_for_tx(&overflow, &ours).is_err());
+    }
+
+    #[test]
+    fn config_ignores_stale_mainnet_and_keeps_testnets() {
+        assert_eq!(config_net("Testnet4"), Some(Net::Testnet4));
+        assert_eq!(config_net("  signet\n"), Some(Net::Signet));
+        assert_eq!(config_net("Mainnet"), None);
+        assert_eq!(config_net("garbage"), None);
+    }
+
+    #[test]
+    fn proxy_settings_are_parsed_and_redacted() {
+        assert_eq!(
+            proxy_from_values(Some("socks5://127.0.0.1:9050"), None).as_deref(),
+            Some("socks5://127.0.0.1:9050")
+        );
+        assert_eq!(
+            proxy_from_values(Some("  "), Some("1")).as_deref(),
+            Some("socks5://127.0.0.1:9050")
+        );
+        assert_eq!(
+            proxy_from_values(Some("socks5://user:pass@host:1080"), Some("1")).as_deref(),
+            Some("socks5://user:pass@host:1080")
+        );
+        assert_eq!(proxy_from_values(None, Some("0")), None);
+        assert_eq!(
+            proxy_desc_for("socks5://user:pass@host:1080"),
+            "socks5://***@host:1080"
+        );
+        assert_eq!(proxy_desc_for("socks5://host:1080"), "socks5://host:1080");
     }
 
     #[test]

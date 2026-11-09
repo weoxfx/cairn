@@ -38,8 +38,17 @@ pub fn parse_bip84_path(path: &DerivationPath, network: Network) -> Option<(u32,
     }
 }
 
+#[cfg(test)]
 fn master(mnemonic: &Mnemonic, network: Network) -> Result<Xpriv, String> {
-    let seed = Zeroizing::new(mnemonic.to_seed(""));
+    master_with_passphrase(mnemonic, network, "")
+}
+
+fn master_with_passphrase(
+    mnemonic: &Mnemonic,
+    network: Network,
+    passphrase: &str,
+) -> Result<Xpriv, String> {
+    let seed = Zeroizing::new(mnemonic.to_seed(passphrase));
     Xpriv::new_master(network, seed.as_ref()).map_err(|e| e.to_string())
 }
 
@@ -78,9 +87,18 @@ pub struct Watch {
 }
 
 impl Watch {
+    #[allow(dead_code)] // compatibility/test entry point
     pub fn from_mnemonic(mnemonic: &Mnemonic, network: Network) -> Result<Self, String> {
+        Self::from_mnemonic_with_passphrase(mnemonic, network, "")
+    }
+
+    pub fn from_mnemonic_with_passphrase(
+        mnemonic: &Mnemonic,
+        network: Network,
+        passphrase: &str,
+    ) -> Result<Self, String> {
         let secp = Secp256k1::new();
-        let mut master = master(mnemonic, network)?;
+        let mut master = master_with_passphrase(mnemonic, network, passphrase)?;
         let path = DerivationPath::from_str(&format!("m/84'/{}'/0'", coin_type(network)))
             .map_err(|e| e.to_string())?;
         let mut acct = match master.derive_priv(&secp, &path) {
@@ -103,6 +121,21 @@ impl Watch {
 
     pub fn xpub_string(&self) -> String {
         self.xpub.to_string()
+    }
+
+    /// BIP84 descriptor for one chain (`0` receive, `1` change), suitable for
+    /// watch-only imports in Bitcoin Core, Sparrow and other wallets.
+    pub fn descriptor(&self, chain: u32) -> Result<String, String> {
+        if chain > 1 {
+            return Err("chain must be 0 (receive) or 1 (change)".into());
+        }
+        Ok(format!(
+            "wpkh([{}/84'/{}'/0']{}/{}/*)",
+            self.xpub.fingerprint(),
+            coin_type(self.network),
+            self.xpub,
+            chain
+        ))
     }
 
     /// `count` addresses on `chain`, starting at `start`.
@@ -162,9 +195,18 @@ pub struct Signer {
 }
 
 impl Signer {
+    #[allow(dead_code)] // compatibility/test entry point
     pub fn from_mnemonic(mnemonic: &Mnemonic, network: Network) -> Result<Self, String> {
+        Self::from_mnemonic_with_passphrase(mnemonic, network, "")
+    }
+
+    pub fn from_mnemonic_with_passphrase(
+        mnemonic: &Mnemonic,
+        network: Network,
+        passphrase: &str,
+    ) -> Result<Self, String> {
         let secp = Secp256k1::new();
-        let mut master = master(mnemonic, network)?;
+        let mut master = master_with_passphrase(mnemonic, network, passphrase)?;
         let path = DerivationPath::from_str(&format!("m/84'/{}'/0'", coin_type(network)))
             .map_err(|e| e.to_string())?;
         let account = match master.derive_priv(&secp, &path) {
@@ -362,6 +404,29 @@ mod tests {
         assert_ne!(a0, w.address_at(0, 1).unwrap());
         assert_ne!(a0, w.address_at(1, 0).unwrap());
         assert!(w.xpub_string().starts_with("tpub"));
+    }
+
+    #[test]
+    fn passphrase_changes_derivation_and_descriptors_are_well_formed() {
+        let m = Mnemonic::parse(ABANDON).unwrap();
+        let plain = Watch::from_mnemonic(&m, Network::Bitcoin).unwrap();
+        let with_pass =
+            Watch::from_mnemonic_with_passphrase(&m, Network::Bitcoin, "correct horse").unwrap();
+        assert_ne!(
+            plain.address_at(0, 0).unwrap(),
+            with_pass.address_at(0, 0).unwrap()
+        );
+
+        let d = plain.descriptor(0).unwrap();
+        assert!(d.starts_with("wpkh(["));
+        assert!(d.contains("/84'/0'/0']"));
+        assert!(d.ends_with("/0/*)"));
+        let c = plain.descriptor(1).unwrap();
+        assert!(c.ends_with("/1/*)"));
+        assert!(plain.descriptor(2).is_err());
+
+        let t = Watch::from_mnemonic(&m, Network::Testnet).unwrap();
+        assert!(t.descriptor(0).unwrap().contains("/84'/1'/0']"));
     }
 
     #[test]
