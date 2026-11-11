@@ -234,8 +234,9 @@ The malware line scans for real when the machine has an engine to scan with: if 
 directory and reports a signature match as a failing check. Cairn itself ships no signatures or
 heuristics — that would be a promise it cannot keep — so without ClamAV the line is `SKIP` with the
 reason and an install hint, never `PASS`. A keylogger or an injected library is covered by the
-loader, tracer and session lines instead of by signatures. It is also available from the wallet
-dashboard. Features Cairn does not have — hardware signers,
+loader, tracer and session lines instead of by signatures. It is also availableIn an interactive terminal the report fills in line by line as each check finishes, with a spinner
+over the slow parts (sockets, USB enumeration, the signature scan); `--json` and piped output stay
+plain. It is also available from the wallet dashboard. Features Cairn does not have — hardware signers,
 multisig, backup verification, final signed-transaction re-display, a third-party audit — are
 listed as `SKIP` with the reason, never as `PASS`. A failing check exits non-zero. The report is
 not an audit and does not certify a wallet as secure; passing checks only mean nothing in the

@@ -493,10 +493,16 @@ impl Drop for StopOnDrop<'_> {
     }
 }
 
+/// Whether stdout is a real terminal, so the screen can be animated and filled
+/// in as work happens instead of only when it finishes.
+pub fn interactive() -> bool {
+    Term::stdout().is_term()
+}
+
 /// Run `f` while a spinner shows. No animation when stdout isn't a terminal,
 /// and a panic in `f` can't leave the spinner thread running.
 pub fn spin<T>(msg: &str, f: impl FnOnce() -> T) -> T {
-    if !Term::stdout().is_term() {
+    if !interactive() {
         return f();
     }
     let done = AtomicBool::new(false);

@@ -63,6 +63,10 @@ pub struct Report {
     network: String,
     fingerprint: Option<String>,
     checks: Vec<Check>,
+    /// Print each line as it is inspected, so the screen fills in like a scan
+    /// instead of showing nothing until the end. Off for `--json` and for any
+    /// non-terminal stdout, where the rows would corrupt machine output.
+    live: bool,
 }
 
 impl Report {
@@ -72,15 +76,20 @@ impl Report {
             network: info.network.clone(),
             fingerprint: None,
             checks: Vec::new(),
+            live: false,
         }
     }
 
     fn add(&mut self, name: &str, status: Status, detail: impl Into<String>) {
-        self.checks.push(Check {
+        let check = Check {
             name: name.to_string(),
             status,
             detail: detail.into(),
-        });
+        };
+        if self.live {
+            print_row(&check);
+        }
+        self.checks.push(check);
     }
 
     fn count(&self, status: Status) -> usize {
@@ -132,23 +141,30 @@ impl Report {
         })
     }
 
-    fn render(&self) {
+    /// Title plus the wallet facts known before the scan starts.
+    fn render_header(&self) {
         ui::set_context(format!("Security check  ·  {}", self.wallet));
         ui::banner();
-        if let Some(fp) = &self.fingerprint {
-            ui::kv("Fingerprint", fp);
-        }
+        ui::kv("Wallet", &self.wallet);
         ui::kv("Network", &self.network);
         println!();
-        for c in &self.checks {
-            println!(
-                "  {} {:<32} {}",
-                c.status.styled(),
-                c.name,
-                style(&c.detail).dim()
-            );
+    }
+
+    fn render(&self) {
+        if !self.live {
+            self.render_header();
+            if let Some(fp) = &self.fingerprint {
+                ui::kv("Fingerprint", fp);
+            }
+            for c in &self.checks {
+                print_row(c);
+            }
         }
         println!();
+        self.render_summary();
+    }
+
+    fn render_summary(&self) {
         ui::grid(&[
             ("Passed", &self.count(Status::Pass).to_string()),
             ("Not checked", &self.count(Status::Skip).to_string()),
@@ -171,6 +187,15 @@ impl Report {
 }
 
 // ---------- individual checks ----------
+
+fn print_row(c: &Check) {
+    println!(
+        "  {} {:<32} {}",
+        c.status.styled(),
+        c.name,
+        style(&c.detail).dim()
+    );
+}
 
 fn encryption_check(info: &keystore::FileInfo) -> (Status, String) {
     match info.version {
@@ -857,6 +882,10 @@ fn path_entries() -> Vec<(String, Option<u32>)> {
 pub fn check(name: &str, json: bool) -> Result<(), String> {
     let info = keystore::inspect(name)?;
     let mut report = Report::new(name, &info);
+    report.live = !json && ui::interactive();
+    if report.live {
+        report.render_header();
+    }
 
     let (s, d) = encryption_check(&info);
     report.add("Wallet encryption", s, d);
@@ -879,6 +908,9 @@ pub fn check(name: &str, json: bool) -> Result<(), String> {
                 "authentication tag verified with your password and the fingerprint re-derived \
                  from the decrypted seed",
             );
+            if report.live {
+                ui::kv("Fingerprint", &opened.fingerprint);
+            }
         }
         Err(e) => {
             report.add(
@@ -920,12 +952,24 @@ pub fn check(name: &str, json: bool) -> Result<(), String> {
     report.add("Loader environment", s, d);
     let (s, d) = path_check(&path_entries());
     report.add("PATH safety", s, d);
-    let (s, d) = listeners_check();
-    report.add("Network exposure", s, d);
-    let (s, d) = usb_check();
-    report.add("USB devices", s, d);
-    let (s, d) = malware_check();
-    report.add("Malware scan", s, d);
+
+    // The slow, animated part: real work happens under the spinner, which
+    // `ui::spin` skips entirely when stdout is not a terminal.
+    let ((ns, nd), (us, ud)) = if report.live {
+        ui::spin("Scanning sockets, USB devices and terminal state", || {
+            (listeners_check(), usb_check())
+        })
+    } else {
+        (listeners_check(), usb_check())
+    };
+    report.add("Network exposure", ns, nd);
+    report.add("USB devices", us, ud);
+    let (ms, md) = if report.live {
+        ui::spin("Scanning for malware signatures (ClamAV)", malware_check)
+    } else {
+        malware_check()
+    };
+    report.add("Malware scan", ms, md);
 
     // Features this build does not have. Never PASS, never silent.
     report.add(
