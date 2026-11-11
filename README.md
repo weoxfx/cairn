@@ -8,6 +8,8 @@ keystore, a watch-only session and careful sending.
 - Create, import and open wallets (BIP39, 24 words, native SegWit / BIP84)
 - Optional BIP39 passphrase (25th word), asked before the wallet is created or opened
 - Encrypted wallet file (Argon2id + ChaCha20-Poly1305, authenticated metadata)
+- Optional generated password: six words from the OS random source (66 bits), shown once on the
+  alternate screen, so a strong password is one keystroke away instead of a habit
 - Balance, transaction list, receive addresses with QR codes
 - Send: address and amount validation, fee choice, coin control, full review screen,
   type `SEND` to confirm, password re-entry, then sign and broadcast
@@ -219,7 +221,21 @@ The usual PSBT review still happens after scanning.
 `cairn security check [WALLET] [--json]` reports what this build can actually verify for one
 wallet: file encryption and format version, file permissions, KDF parameters, ciphertext integrity
 (it asks for your password and re-derives the fingerprint), network/Tor configuration, recovery
-metadata, and this process's memory protections. It is also available from the wallet dashboard. Features Cairn does not have — hardware signers,
+metadata, and this process's memory protections. It also looks at the machine rather than the
+wallet: whether the session is a local terminal or an SSH/pipe session, whether anything is
+tracing the process (`TracerPid`, e.g. a debugger that could read the password), loader-injection
+variables (`LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`, `DYLD_*`) and a system-wide
+`/etc/ld.so.preload` hook, PATH entries other users can write to, listening TCP sockets and whether
+any of them accept connections from other machines, and the attached USB devices with their
+keyboard/HID and storage interfaces.
+
+The malware line scans for real when the machine has an engine to scan with: if ClamAV's
+`clamscan` (or `clamdscan`) is installed, Cairn runs it over the running binary and the wallet
+directory and reports a signature match as a failing check. Cairn itself ships no signatures or
+heuristics — that would be a promise it cannot keep — so without ClamAV the line is `SKIP` with the
+reason and an install hint, never `PASS`. A keylogger or an injected library is covered by the
+loader, tracer and session lines instead of by signatures. It is also available from the wallet
+dashboard. Features Cairn does not have — hardware signers,
 multisig, backup verification, final signed-transaction re-display, a third-party audit — are
 listed as `SKIP` with the reason, never as `PASS`. A failing check exits non-zero. The report is
 not an audit and does not certify a wallet as secure; passing checks only mean nothing in the

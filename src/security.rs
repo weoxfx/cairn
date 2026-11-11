@@ -11,6 +11,7 @@
 use crate::keystore::{self, KdfParams};
 use crate::{esplora, ui};
 use console::style;
+use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Status {
@@ -379,6 +380,478 @@ fn recovery_check(
     }
 }
 
+// ---------- host environment ----------
+//
+// Everything here observes the machine Cairn is running on, not the wallet. It
+// catches the surroundings an attacker would need: a remote session, a loaded
+// library, a writable PATH entry, a service listening for the network.
+
+/// Host text (PATH entries, locale-dependent names) is untrusted input for the
+/// screen, so it is reduced to printable ASCII and bounded, like server text.
+fn safe(s: &str, max_chars: usize) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .take(max_chars)
+        .collect()
+}
+
+fn session_check(ssh: bool, is_tty: bool) -> (Status, String) {
+    if ssh {
+        return (
+            Status::Warn,
+            "SSH session: keystrokes, the password and the decrypted seed cross the network and \
+             the remote host's terminal. Run Cairn on the machine that holds the wallet"
+                .into(),
+        );
+    }
+    if !is_tty {
+        return (
+            Status::Warn,
+            "stdin/stdout is not a terminal: typed secrets would not be hidden, and this report \
+             may be going to a pipe or a log file"
+                .into(),
+        );
+    }
+    (
+        Status::Pass,
+        "local terminal, not an SSH session: nothing in this session leaves the machine".into(),
+    )
+}
+
+const LOADER_VARS: [&str; 5] = [
+    "LD_PRELOAD",
+    "LD_AUDIT",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+];
+
+fn loader_check(set: &[&str], preload: Option<&str>) -> (Status, String) {
+    let mut causes = Vec::new();
+    if let Some(preload) = preload {
+        causes.push(format!("/etc/ld.so.preload lists {}", safe(preload, 120)));
+    }
+    if !set.is_empty() {
+        causes.push(format!("{} set", set.join(", ")));
+    }
+    if causes.is_empty() {
+        return (
+            Status::Pass,
+            "no loader-injection variables are set and /etc/ld.so.preload is empty or absent"
+                .into(),
+        );
+    }
+    (
+        Status::Warn,
+        format!(
+            "{}: a library loaded this way runs inside Cairn and can read every keystroke and \
+             secret. If you did not set it yourself, start Cairn from a clean shell",
+            causes.join("; ")
+        ),
+    )
+}
+
+/// A system-wide preload hook, the usual way a rootkit enters every process on
+/// a Linux machine. `None` when the file is absent or has no live entries.
+fn ld_preload() -> Option<String> {
+    let text = std::fs::read_to_string("/etc/ld.so.preload").ok()?;
+    let entries: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries.join(", "))
+    }
+}
+
+/// `TracerPid` from `/proc/self/status`: `Some(0)` when nothing is attached,
+/// `Some(pid)` when a tracer is, `None` when the file cannot be read.
+fn parse_tracer(status: &str) -> Option<u32> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("TracerPid:"))
+        .and_then(|value| value.trim().parse().ok())
+}
+
+fn tracer_check(tracer: Option<u32>) -> (Status, String) {
+    match tracer {
+        Some(0) => (
+            Status::Pass,
+            "no process is tracing Cairn: ptrace would let it read the password and the decrypted \
+             seed"
+                .into(),
+        ),
+        Some(pid) => (
+            Status::Warn,
+            format!(
+                "process {pid} is tracing Cairn (TracerPid): a debugger or an injected library can \
+                 read the password and the decrypted seed"
+            ),
+        ),
+        None => (
+            Status::Skip,
+            "not checked: /proc/self/status cannot be read on this machine".into(),
+        ),
+    }
+}
+
+/// One of the two command-line ClamAV clients, if this machine has one. Cairn
+/// carries no signatures, so an installed engine is the only way to actually
+/// look for known malware.
+fn find_scanner() -> Option<(std::path::PathBuf, &'static str)> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        for name in ["clamscan", "clamdscan"] {
+            let candidate = dir.join(name);
+            let executable = std::fs::metadata(&candidate)
+                .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false);
+            if executable {
+                return Some((candidate, name));
+            }
+        }
+    }
+    None
+}
+
+/// Turns a finished scanner run into a report line. ClamAV exits 0 for clean,
+/// 1 for a signature match and anything else for a failure it could not act on.
+fn scan_report(
+    engine: &str,
+    paths: usize,
+    code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+) -> (Status, String) {
+    match code {
+        Some(0) => (
+            Status::Pass,
+            format!(
+                "{engine} scanned {paths} path(s) (the running binary and the wallet directory) \
+                 with no signature match"
+            ),
+        ),
+        Some(1) => {
+            let hits: Vec<String> = stdout
+                .lines()
+                .filter(|line| line.trim_end().ends_with("FOUND"))
+                .take(3)
+                .map(|line| safe(line.trim(), 160))
+                .collect();
+            let detail = if hits.is_empty() {
+                "a signature matched but the scanner printed no file names".to_string()
+            } else {
+                hits.join("; ")
+            };
+            (
+                Status::Fail,
+                format!("{engine} reported malware: {detail}. Do not type your password here"),
+            )
+        }
+        _ => (
+            Status::Skip,
+            format!(
+                "not checked: {engine} could not finish ({}). Check its signature database",
+                safe(last_meaningful_line(stdout, stderr), 140)
+            ),
+        ),
+    }
+}
+
+fn last_meaningful_line<'a>(stdout: &'a str, stderr: &'a str) -> &'a str {
+    let last = |text: &'a str| {
+        text.lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+    };
+    last(stderr).or_else(|| last(stdout)).unwrap_or("no output")
+}
+
+fn malware_check() -> (Status, String) {
+    let Some((scanner, engine)) = find_scanner() else {
+        return (
+            Status::Skip,
+            "not checked: no antivirus engine on this machine. Cairn ships no signatures or \
+             heuristics, so install ClamAV (`clamscan`) and this line scans the running binary and \
+             the wallet directory with it"
+                .into(),
+        );
+    };
+    let mut targets = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        targets.push(exe);
+    }
+    if let Ok(dir) = keystore::wallet_dir() {
+        targets.push(dir);
+    }
+    if targets.is_empty() {
+        return (
+            Status::Skip,
+            format!("not checked: {engine} found but there is nothing it can be pointed at"),
+        );
+    }
+    let run = std::process::Command::new(&scanner)
+        .args(["--no-summary", "--infected"])
+        .args(&targets)
+        .stdin(std::process::Stdio::null())
+        .output();
+    let output = match run {
+        Ok(output) => output,
+        Err(e) => {
+            return (
+                Status::Skip,
+                format!("not checked: cannot run {engine}: {e}"),
+            )
+        }
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let label = format!("{engine} (ClamAV)");
+    scan_report(
+        &label,
+        targets.len(),
+        output.status.code(),
+        &stdout,
+        &stderr,
+    )
+}
+
+/// `entries` is each PATH component with the directory's permission bits, or
+/// `None` when it does not exist.
+fn path_check(entries: &[(String, Option<u32>)]) -> (Status, String) {
+    if entries.is_empty() {
+        return (
+            Status::Skip,
+            "PATH is not set, so there is nothing to inspect".into(),
+        );
+    }
+    let mut writable = Vec::new();
+    let mut relative = Vec::new();
+    let mut existing = 0usize;
+    for (dir, mode) in entries {
+        if let Some(mode) = mode {
+            existing += 1;
+            if mode & 0o022 != 0 {
+                writable.push(format!("{} ({:04o})", safe(dir, 80), mode & 0o777));
+            }
+        }
+        if dir.is_empty() || !dir.starts_with('/') {
+            relative.push(if dir.is_empty() {
+                "empty entry".to_string()
+            } else {
+                safe(dir, 80)
+            });
+        }
+    }
+    if !writable.is_empty() {
+        return (
+            Status::Warn,
+            format!(
+                "writable by other users, where a fake `cairn` can be planted: {}",
+                writable.join(", ")
+            ),
+        );
+    }
+    if !relative.is_empty() {
+        return (
+            Status::Warn,
+            format!(
+                "relative entries resolve against whatever directory you are in: {}",
+                relative.join(", ")
+            ),
+        );
+    }
+    (
+        Status::Pass,
+        format!("{existing} directories, none writable by other users of this machine"),
+    )
+}
+
+/// One LISTEN row per socket, from `/proc/net/tcp{,6}`: (address hex, port).
+fn parse_listeners(table: &str) -> Vec<(String, u16)> {
+    let mut out = Vec::new();
+    for line in table.lines().skip(1) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        // sl local_address rem_address st ... ; st 0A is TCP_LISTEN.
+        if fields.len() < 4 || fields[3] != "0A" {
+            continue;
+        }
+        let Some((addr, port)) = fields[1].split_once(':') else {
+            continue;
+        };
+        let Ok(port) = u16::from_str_radix(port, 16) else {
+            continue;
+        };
+        out.push((addr.to_string(), port));
+    }
+    out
+}
+
+/// True only for a loopback bind. ``0.0.0.0`` and ``::`` are *not* loopback:
+/// they accept connections from other machines.
+fn is_loopback(addr: &str) -> bool {
+    if addr.len() == 8 {
+        let Ok(value) = u32::from_str_radix(addr, 16) else {
+            return false;
+        };
+        return std::net::Ipv4Addr::from(value.to_le_bytes()).is_loopback();
+    }
+    // IPv6 rows are 32 hex digits; only the loopback word pattern matters here.
+    addr == "00000000000000000000000001000000"
+}
+
+fn port_list(ports: &BTreeSet<u16>) -> String {
+    let mut shown: Vec<String> = ports.iter().take(5).map(u16::to_string).collect();
+    if ports.len() > 5 {
+        shown.push(format!("and {} more", ports.len() - 5));
+    }
+    shown.join(", ")
+}
+
+fn listeners_check() -> (Status, String) {
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        return (
+            Status::Skip,
+            "listening sockets can only be read from /proc/net on Linux and Android".into(),
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let mut sockets = Vec::new();
+        for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
+            if let Ok(text) = std::fs::read_to_string(table) {
+                sockets.extend(parse_listeners(&text));
+            }
+        }
+        if sockets.is_empty() {
+            return (Status::Pass, "no listening TCP sockets".into());
+        }
+        let (mut local, mut exposed) = (BTreeSet::new(), BTreeSet::new());
+        for (addr, port) in &sockets {
+            if is_loopback(addr) {
+                local.insert(*port);
+            } else {
+                exposed.insert(*port);
+            }
+        }
+        if !exposed.is_empty() {
+            return (
+                Status::Warn,
+                format!(
+                    "{} listening socket(s), {} reachable from other machines ({}); Cairn needs \
+                     none of them",
+                    sockets.len(),
+                    exposed.len(),
+                    port_list(&exposed)
+                ),
+            );
+        }
+        (
+            Status::Pass,
+            format!(
+                "{} listening socket(s), loopback only ({})",
+                sockets.len(),
+                port_list(&local)
+            ),
+        )
+    }
+}
+
+fn usb_check() -> (Status, String) {
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        return (
+            Status::Skip,
+            "USB device inventory needs /sys/bus/usb, which Linux and Android have".into(),
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let Ok(entries) = std::fs::read_dir("/sys/bus/usb/devices") else {
+            return (
+                Status::Skip,
+                "not verified: /sys/bus/usb/devices cannot be read on this machine".into(),
+            );
+        };
+        let (mut devices, mut hid, mut storage) = (0usize, 0usize, 0usize);
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.join("idVendor").exists() {
+                devices += 1;
+            }
+            // Interfaces are the `<bus>-<port>:<config>.<if>` directories.
+            if let Ok(class) = std::fs::read_to_string(path.join("bInterfaceClass")) {
+                match class.trim() {
+                    "03" => hid += 1,     // HID: keyboards, mice, keystroke injectors
+                    "08" => storage += 1, // mass storage
+                    _ => {}
+                }
+            }
+        }
+        if devices == 0 {
+            return (
+                Status::Skip,
+                "not verified: no USB devices are attached".into(),
+            );
+        }
+        (
+            Status::Skip,
+            format!(
+                "not verified: {devices} USB device(s), {hid} keyboard/HID interface(s), \
+                 {storage} storage interface(s). A keyboard can type into Cairn and a stick can \
+                 carry a BadUSB payload; check that you recognise every one"
+            ),
+        )
+    }
+}
+
+fn terminal_is_tty() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+fn ssh_session() -> bool {
+    ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+}
+
+fn loader_vars_set() -> Vec<&'static str> {
+    LOADER_VARS
+        .into_iter()
+        .filter(|name| {
+            std::env::var(name)
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+fn path_entries() -> Vec<(String, Option<u32>)> {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(path) = std::env::var_os("PATH") else {
+        return Vec::new();
+    };
+    let path = path.to_string_lossy();
+    path.split(':')
+        .map(|dir| {
+            let mode = std::fs::metadata(dir)
+                .ok()
+                .filter(|m| m.is_dir())
+                .map(|m| m.permissions().mode());
+            (dir.to_string(), mode)
+        })
+        .collect()
+}
+
 // ---------- command ----------
 
 pub fn check(name: &str, json: bool) -> Result<(), String> {
@@ -435,6 +908,24 @@ pub fn check(name: &str, json: bool) -> Result<(), String> {
     report.add("Recovery metadata", s, d);
     let (s, d) = memory_check();
     report.add("Secret memory", s, d);
+
+    // The machine, not the wallet: what an attacker would need to be in place
+    // before the password or the seed is typed.
+    let (s, d) = session_check(ssh_session(), terminal_is_tty());
+    report.add("Terminal session", s, d);
+    let self_status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let (s, d) = tracer_check(parse_tracer(&self_status));
+    report.add("Debugger / tracer", s, d);
+    let (s, d) = loader_check(&loader_vars_set(), ld_preload().as_deref());
+    report.add("Loader environment", s, d);
+    let (s, d) = path_check(&path_entries());
+    report.add("PATH safety", s, d);
+    let (s, d) = listeners_check();
+    report.add("Network exposure", s, d);
+    let (s, d) = usb_check();
+    report.add("USB devices", s, d);
+    let (s, d) = malware_check();
+    report.add("Malware scan", s, d);
 
     // Features this build does not have. Never PASS, never silent.
     report.add(
@@ -568,6 +1059,97 @@ mod tests {
             network_check("mainnet", Net::Testnet4, true, None).0,
             Status::Warn
         );
+    }
+
+    #[test]
+    fn loader_injection_is_a_warning() {
+        assert_eq!(loader_check(&[], None).0, Status::Pass);
+        assert_eq!(loader_check(&["LD_PRELOAD"], None).0, Status::Warn);
+        assert_eq!(
+            loader_check(&["LD_PRELOAD", "LD_LIBRARY_PATH"], None).0,
+            Status::Warn
+        );
+        // A system-wide preload hook is the same threat as an env var.
+        let hooked = loader_check(&[], Some("/opt/hide.so"));
+        assert_eq!(hooked.0, Status::Warn);
+        assert!(hooked.1.contains("/opt/hide.so"));
+    }
+
+    #[test]
+    fn only_an_unattached_process_is_not_traced() {
+        let idle = "Name:\tcairn\nTracerPid:\t0\nUid:\t1000\n";
+        assert_eq!(parse_tracer(idle), Some(0));
+        assert_eq!(tracer_check(parse_tracer(idle)).0, Status::Pass);
+
+        assert_eq!(parse_tracer("TracerPid:\t4242\n"), Some(4242));
+        assert_eq!(tracer_check(Some(4242)).0, Status::Warn);
+
+        assert_eq!(parse_tracer("Name:\tcairn\n"), None);
+        assert_eq!(tracer_check(None).0, Status::Skip);
+    }
+
+    #[test]
+    fn scanner_results_map_to_pass_fail_and_skip() {
+        assert_eq!(scan_report("clamscan", 2, Some(0), "", "").0, Status::Pass);
+
+        let infected = "/home/u/.cairn/wallets/main.cairn: Win.Trojan.Agent-1 FOUND\n";
+        let found = scan_report("clamscan", 2, Some(1), infected, "");
+        assert_eq!(
+            found.0,
+            Status::Fail,
+            "a signature match must fail the check"
+        );
+        assert!(found.1.contains("Trojan"));
+
+        let broken = scan_report("clamscan", 2, Some(2), "", "Database error\n");
+        assert_eq!(broken.0, Status::Skip);
+        assert!(broken.1.contains("Database error"));
+
+        // Killed by a signal: no exit code at all, so nothing was inspected.
+        assert_eq!(scan_report("clamscan", 2, None, "", "").0, Status::Skip);
+    }
+
+    #[test]
+    fn writable_or_relative_path_entries_warn() {
+        let root_owned = vec![("/usr/bin".to_string(), Some(0o040755))];
+        assert_eq!(path_check(&root_owned).0, Status::Pass);
+
+        let writable = vec![("/tmp/bin".to_string(), Some(0o041777))];
+        assert_eq!(path_check(&writable).0, Status::Warn);
+
+        let group_write = vec![("/opt/bin".to_string(), Some(0o040775))];
+        assert_eq!(path_check(&group_write).0, Status::Warn);
+
+        let relative = vec![("bin".to_string(), Some(0o040755))];
+        assert_eq!(path_check(&relative).0, Status::Warn);
+
+        let empty = vec![("".to_string(), None)];
+        assert_eq!(path_check(&empty).0, Status::Warn);
+
+        assert_eq!(path_check(&[]).0, Status::Skip);
+    }
+
+    #[test]
+    fn proc_net_listeners_are_parsed_and_classified() {
+        let table = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+             0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 1\n\
+             1: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 2\n\
+             2: 0100007F:C001 0100007F:1F90 01 00000000:00000000 00:00000000 00000000  1000        0 3\n";
+        let listeners = parse_listeners(table);
+        assert_eq!(listeners.len(), 2, "only LISTEN rows count");
+        assert!(is_loopback(&listeners[0].0));
+        assert_eq!(listeners[0].1, 8080);
+        assert!(!is_loopback(&listeners[1].0), "0.0.0.0 is not loopback");
+        assert_eq!(listeners[1].1, 22);
+        assert!(!is_loopback("00000000000000000000000000000000"));
+        assert!(is_loopback("00000000000000000000000001000000"));
+    }
+
+    #[test]
+    fn sessions_are_only_passes_when_local_and_interactive() {
+        assert_eq!(session_check(false, true).0, Status::Pass);
+        assert_eq!(session_check(true, true).0, Status::Warn);
+        assert_eq!(session_check(false, false).0, Status::Warn);
     }
 
     #[test]

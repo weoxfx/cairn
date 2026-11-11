@@ -4,6 +4,7 @@ mod keystore;
 mod labels;
 mod network;
 mod offline;
+mod passphrase;
 mod psbt_guard;
 mod qr;
 mod security;
@@ -424,6 +425,9 @@ fn ask_new_password() -> Result<Zeroizing<String>, String> {
         "{}",
         style("Tip: 5+ random words make a strong, memorable passphrase.").dim()
     );
+    if ui::confirm("Generate a strong random password for you?", false) {
+        return suggest_password();
+    }
     let pw = Password::with_theme(&theme())
         .with_prompt("Set password")
         .with_confirmation("Repeat password", "Passwords don't match")
@@ -432,6 +436,34 @@ fn ask_new_password() -> Result<Zeroizing<String>, String> {
     let pw = Zeroizing::new(pw);
     if let Some(msg) = weak_password(&pw) {
         return Err(msg);
+    }
+    Ok(pw)
+}
+
+/// Generate a password, show it once on the alternate screen (no scrollback) and
+/// keep it only if the user confirms they wrote it down.
+fn suggest_password() -> Result<Zeroizing<String>, String> {
+    let pw = passphrase::generate(passphrase::DEFAULT_WORDS)?;
+    ui::secret_screen(|| {
+        banner();
+        section("Wallet password");
+        println!();
+        println!("  {}", style(pw.as_str()).bold().cyan());
+        println!();
+        hint(&format!(
+            "{} words from a 2048-word list: {} bits of entropy.",
+            passphrase::DEFAULT_WORDS,
+            passphrase::entropy_bits(passphrase::DEFAULT_WORDS)
+        ));
+        hint("Write it down now, on paper and not in this terminal.");
+        hint("It is not stored anywhere: without it the wallet cannot be opened.");
+        println!();
+        pause();
+    });
+    if !ui::confirm("Have you written this password down?", false) {
+        return Err(
+            "No wallet was created. Start again when you can write the password down.".into(),
+        );
     }
     Ok(pw)
 }
