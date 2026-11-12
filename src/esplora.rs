@@ -1137,6 +1137,59 @@ mod tests {
     use super::*;
     use bitcoin::hashes::Hash;
 
+    fn prev_tx_json() -> Value {
+        serde_json::json!({
+            "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+            "weight": 800,
+            "status": {"confirmed": false},
+            "vin": [{
+                "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+                "vout": 1,
+                "prevout": {"value": 50_000, "scriptpubkey_address": "tb1qours"}
+            }],
+            "vout": [
+                {"value": 30_000, "scriptpubkey_address": "tb1qthem"},
+                {"value": 19_000, "scriptpubkey_address": "tb1qours"}
+            ]
+        })
+    }
+
+    #[test]
+    fn full_tx_parsing_is_bounded_and_exact() {
+        let t = parse_full_tx(&prev_tx_json()).unwrap();
+        assert_eq!(t.vsize, 200);
+        assert_eq!(t.inputs.len(), 1);
+        assert_eq!(t.inputs[0].value, 50_000);
+        assert_eq!(t.outputs.len(), 2);
+        assert_eq!(t.outputs[0].value, 30_000);
+        assert!(!t.confirmed);
+
+        // Coinbase inputs cannot be replaced.
+        let mut cb = prev_tx_json();
+        cb["vin"][0]["is_coinbase"] = serde_json::json!(true);
+        assert!(parse_full_tx(&cb).is_err());
+
+        // Outputs above the money supply are refused.
+        let mut huge = prev_tx_json();
+        huge["vout"][0]["value"] = serde_json::json!(network::MAX_MONEY_SATS + 1);
+        assert!(parse_full_tx(&huge).is_err());
+
+        // A transaction that creates value is refused.
+        let mut conjure = prev_tx_json();
+        conjure["vin"][0]["prevout"]["value"] = serde_json::json!(10_000);
+        assert!(parse_full_tx(&conjure).is_err());
+
+        // Missing metadata is refused, never defaulted to zero.
+        let mut sparse = prev_tx_json();
+        sparse["vin"][0]["prevout"] = serde_json::json!({});
+        assert!(parse_full_tx(&sparse).is_err());
+
+        // An impossible size is refused.
+        let mut sized = prev_tx_json();
+        sized["weight"] = serde_json::json!(0);
+        assert!(parse_full_tx(&sized).is_err());
+    }
+
     #[test]
     fn prevout_checks_reject_server_lies() {
         use serde_json::json;
