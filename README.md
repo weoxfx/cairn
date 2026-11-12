@@ -44,6 +44,7 @@ phrase offline.
 | Offline | `--offline` never opens a socket. It checks that every input belongs to the wallet, has the expected network-specific BIP84 path and script, that change is ours, that the fee clears the relay minimum and the rate ceiling, and caps PSBTs at 500 inputs / 500 outputs. PSBT files must be regular files (no FIFOs or symlinks) and signed output is written atomically at mode 600. The online side refuses a signed PSBT that changed any input or output. QR frames are checksummed and then go through the same checks; they are public data, not encrypted |
 | Network | HTTPS-only with certificate checks; redirects are same-origin (host and port) and re-checked, broadcasts refuse them. Optional SOCKS5/Tor proxy (`CAIRN_PROXY` or `CAIRN_TOR=1`), with DNS resolved by the proxy. Response size caps fail closed, with rate pacing, failover and a chain-specific URL guard; userinfo and IPv6 authorities are rejected. Server data is treated as untrusted; UTXO/input/output/balance/history amounts and block heights are bounded, txids are validated, and server text is reduced to printable ASCII by an allowlist before display |
 | Mainnet | The default for new wallets; testnet is available at creation/import. The wallet's network is stored and authenticated, and the API layer refuses cross-chain endpoints |
+| EVM | Same encrypted seed, a separate derivation: `m/44'/60'/0'/0/index`, so one wallet holds Bitcoin and an EVM account. EIP-55 checksums are verified on mixed-case input, the zero address is refused, token calldata is cross-checked against the reviewed recipient, signatures are EIP-1559 only, and the fee is capped at 2,000 gwei unless `--force-fee` is given. Every RPC endpoint is probed with `eth_chainId` and refused if it reports another chain. Offline signing reads a JSON file and makes no network request; broadcast re-checks the transaction and the node's returned hash |
 | Process | No core dumps, umask 077, 5-minute idle lock; non-dumpable on Linux/Android |
 
 Cryptographic primitives come from audited libraries (rust-bitcoin, libsecp256k1, RustCrypto).
@@ -216,6 +217,56 @@ The usual PSBT review still happens after scanning.
 - **Labels:** `cairn --label <TXID> "<label>"` stores a BIP329 `tx` record in
   `~/.cairn/labels.jsonl`; labels appear in the transaction list.
 
+## EVM wallets
+
+One seed, two chains. An existing Cairn wallet derives its EVM account at
+`m/44'/60'/0'/0/index`, so there is no second seed phrase and no second keystore. The EVM code
+lives beside the Bitcoin code rather than inside it: nothing in the EVM path can build or sign a
+PSBT, and nothing in the Bitcoin path can reach an EVM endpoint.
+
+```sh
+cairn evm                                          # interactive EVM dashboard
+cairn evm chains                                   # supported chains and IDs
+cairn evm use base                                 # save a default chain
+cairn evm address --qr                             # receive address + QR
+cairn evm balance                                  # native balance, token names, USD values
+cairn evm token add 0xA0b8...eB48                  # track an ERC-20 (name, symbol, decimals read on-chain)
+cairn evm send --to 0x.. --amount 0.05             # build, review, confirm, broadcast
+cairn evm send --to 0x.. --amount 25 --token 0xA0b8...eB48
+```
+
+Running `cairn evm` with no arguments opens the same kind of dashboard as the Bitcoin side — balance
+card, token table, menu, five-minute idle lock — rather than a different-looking command surface.
+
+Supported: Ethereum, Base, Arbitrum One, OP Mainnet, Polygon and Sepolia. Add a chain by adding an
+entry to `CHAINS` in `src/evm/chains.rs`; the registry is checked by tests for duplicate IDs and
+non-TLS endpoints.
+
+**Offline signing** works the same way as the PSBT flow, with a JSON document instead of a PSBT:
+
+```sh
+cairn evm send --to 0x.. --amount 0.05 --build unsigned.ethtx.json   # online: fills nonce, gas, fees
+cairn evm sign unsigned.ethtx.json --out signed.ethtx.json           # offline: no network at all
+cairn evm broadcast signed.ethtx.json                                # online: sends the raw bytes
+```
+
+The unsigned file carries every value that will be signed, and both `sign` and `broadcast`
+re-validate it from scratch. `sign` refuses a transaction whose `from` is not the unlocked wallet's
+address at that index, and `broadcast` refuses a signed file whose hash does not match its bytes or
+the hash the node echoes back.
+
+**Settings:**
+
+- `CAIRN_EVM_CHAIN` or `cairn evm use <chain>` sets the default chain.
+- `CAIRN_EVM_RPC=https://your-node` overrides the built-in endpoints. It is still chain-id checked.
+- `CAIRN_PROXY` / `CAIRN_TOR=1` apply to EVM RPC traffic as well.
+- `CAIRN_NO_PRICE=1` disables the USD estimate, which is fetched from CoinGecko and used for display
+  only. `CAIRN_PRICE_API` points it at a different endpoint.
+
+**Not implemented (honest limits):** the EVM side does native transfers and ERC-20 `transfer` calls
+only — no swaps, no arbitrary contract calls, no approvals, and no transaction history (that needs
+an indexer or an API key). It has not been through the source-level review the Bitcoin path has.
+
 ## Security check
 
 `cairn security check [WALLET] [--json]` reports what this build can actually verify for one
@@ -244,8 +295,10 @@ inspected set was wrong.
 
 ## JSON output
 
-`--json` currently covers `--version`, `--descriptor`, `--label` and `security check`. It is intended for scripts and
-integration tests, not for interactive use. Errors still go to stderr as text.
+`--json` currently covers `--version`, `--descriptor`, `--label`, `security check` and every
+`cairn evm` subcommand. It is intended for scripts and integration tests, not for interactive use.
+Errors still go to stderr as text, and `cairn evm` requires an explicit wallet name with `--json`
+so the output can never be mixed with an interactive picker.
 
 ## Development
 
@@ -268,8 +321,8 @@ ceilings, descriptor/passphrase derivation and QR frame render/scan tests. Fuzz 
 Push a version tag to publish downloadable binaries:
 
 ```sh
-git tag v0.8.0
-git push origin v0.8.0
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
 The release workflow builds a static Linux x86_64 binary, a Linux ARM64 binary and macOS binaries for
@@ -292,6 +345,9 @@ manifest. See [RELEASE-SIGNING.md](RELEASE-SIGNING.md) and [REPRODUCIBLE.md](REP
 - [x] Fuzzing harness for URL/redirect, QR frames, PSBT and keystore
 - [x] Pinned GitHub Actions, cargo-deny, reproducible-build CI check, optional signed releases
 - [x] Source-level security review and remediation
+- [x] EVM accounts from the same seed (Ethereum, Base, Arbitrum, OP, Polygon, Sepolia)
+- [x] ERC-20 balances with token names and USD values, EIP-1559 offline signing and broadcast
+- [x] Interactive EVM dashboard in the same shell as the Bitcoin wallet
 - [ ] 2-of-3 multisig, Electrum protocol, Taproot/BIP86, RBF fee bumping
 - [ ] Windows support and packaged installers
 

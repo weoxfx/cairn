@@ -9,6 +9,38 @@ Mainnet is the default when creating or importing a wallet. Testnet (Testnet4, T
 can be selected instead. A wallet's network is recorded in the keystore, authenticated by the v2/v3
 AAD and bound to the matching API; cross-chain endpoints are refused.
 
+## EVM accounts
+
+EVM support reuses the same encrypted seed and keystore; no second secret is stored. The account is
+derived at `m/44'/60'/0'/0/index` (coin type 60) and only the account xpub is kept after unlock. The
+EVM signer is a separate type from the Bitcoin signer and is erased on drop.
+
+- **Chain binding:** every RPC endpoint is probed with `eth_chainId` before use and dropped if it
+  reports a chain other than the selected one. A transaction records its chain id, is checked
+  against the selected chain before signing, and `broadcast` refuses a file for another chain.
+- **Addresses:** EIP-55 mixed-case checksums are verified; a value whose case pattern disagrees with
+  its checksum is rejected rather than silently lowercased. All-lowercase input is accepted as
+  unchecksummed, which is what block explorers and other wallets emit.
+- **Sending:** the zero address is refused, native transfers may not carry calldata, and an ERC-20
+  transfer's calldata recipient must match the address shown on the review screen. The gas limit is
+  bounded (21,000–30,000,000), the maximum fee is capped at 2,000 gwei unless `--force-fee` is
+  passed, the priority fee may not exceed the maximum fee, and the balance is checked against
+  `value + gas_limit × max_fee` before anything is signed. EIP-1559 only; signatures are
+  deterministic (RFC6979).
+- **Offline signing:** `cairn evm sign` performs no network I/O. It re-validates the whole document,
+  refuses a transaction whose `from` does not match the unlocked wallet, and writes the signed file
+  atomically at mode 600. `cairn evm broadcast` re-validates the signature file, checks that its
+  hash matches its bytes, and refuses to report success if the node echoes a different hash.
+- **Untrusted node data:** responses are size-capped, kept to one endpoint per request (no
+  redirects), and node-supplied text is reduced to printable ASCII before display.
+- **Price feed:** the optional USD estimate is the only request to a non-RPC host (CoinGecko by
+  default), and it covers both the native coin and tracked ERC-20 contracts. It is display-only,
+  cannot influence an amount, fee, address or signature, fails soft to "no fiat line" (an unknown
+  token simply has no value), and can be disabled with `CAIRN_NO_PRICE=1`. Like the block explorer,
+  it learns your IP, which contracts you hold, and your refresh timing.
+
+The EVM path has not been through the source-level review described below.
+
 ## Review status
 
 Source-level reviews were completed on 2026-11-08 and 2026-11-09. The

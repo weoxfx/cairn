@@ -143,16 +143,24 @@ pub fn clear() {
 ///   Cairn   main - 73c5da0a                              mainnet
 /// ```
 pub fn banner() {
+    let testnet = display_network() != Network::Bitcoin;
+    banner_with(if testnet { "testnet" } else { "mainnet" }, testnet);
+}
+
+/// Banner with an explicit right-hand status, for screens that are not on the
+/// Bitcoin display network (EVM chains). `alert` paints the status like a
+/// testnet, so a test chain is never mistaken for real money.
+pub fn banner_with(status: &str, alert: bool) {
     clear();
     let w = width();
-    let net = if display_network() == Network::Bitcoin {
-        style("mainnet").dim().to_string()
+    let right = if alert {
+        style(status).cyan().bold().to_string()
     } else {
-        style("testnet").cyan().bold().to_string()
+        style(status).dim().to_string()
     };
     let crumb = context().unwrap_or_else(|| "No wallet open".to_string());
     let left = format!("{}   {}", style("Cairn").bold(), style(crumb).dim());
-    println!("{MARGIN}{}\n", split_line(&left, &net, w));
+    println!("{MARGIN}{}\n", split_line(&left, &right, w));
 }
 
 /// Faint full-width rule. Use sparingly.

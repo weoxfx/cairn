@@ -5,6 +5,7 @@
 //! stay in the binary target (`[lib] test = false`).
 
 pub mod esplora;
+pub mod evm;
 pub mod hardening;
 pub mod keystore;
 pub mod labels;

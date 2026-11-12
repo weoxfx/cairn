@@ -1,4 +1,6 @@
 mod esplora;
+mod evm;
+mod evm_cli;
 mod hardening;
 mod keystore;
 mod labels;
@@ -83,6 +85,7 @@ fn run() -> Result<(), String> {
             security_check(&args[2..], json)
         }
         "--security-check" => security_check(&args[1..], json),
+        "evm" => evm_cli::run(&args[1..], json),
         "--create-psbt" => {
             let (pos, out) = parse_args(&args[1..])?;
             if pos.len() > 1 {
@@ -291,6 +294,8 @@ Usage:
   cairn --label <TXID> <LABEL> [--json]      Store a BIP329 transaction label
   cairn security check [WALLET] [--json]     Report what this build can verify
   cairn --security-check [WALLET] [--json]   Same as `security check`
+  cairn evm <command>                        EVM accounts, tokens and transfers
+                                             (see `cairn evm help`)
   cairn --version [--json]                   Show the version
   cairn --help                               Show this help
 
