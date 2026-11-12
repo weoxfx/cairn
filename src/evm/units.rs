@@ -13,7 +13,7 @@ pub const MAX_DECIMALS: u32 = 36;
 pub fn pow10(decimals: u32) -> U256 {
     let mut v = U256::one();
     for _ in 0..decimals {
-        v = v * U256::from(10u8);
+        v *= U256::from(10u8);
     }
     v
 }
@@ -107,7 +107,7 @@ pub fn format_amount(v: U256, decimals: u32, max_frac: usize) -> String {
 fn group_digits(s: &str) -> String {
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             out.push('\u{2009}');
         }
         out.push(c);
@@ -178,7 +178,7 @@ mod tests {
             "115792089237316195423570985008687907853269984665640564039457584007913129639935",
         )
         .unwrap();
-        assert_eq!(format_units(u, 18).len() > 60, true);
+        assert!(format_units(u, 18).len() > 60);
     }
 
     #[test]

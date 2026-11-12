@@ -962,6 +962,111 @@ pub fn verify_prevouts(net: Net, utxos: &[Utxo]) -> Result<(), String> {
     Ok(())
 }
 
+/// One output of a fully fetched transaction.
+pub struct PrevTxOut {
+    pub address: Option<String>,
+    pub value: u64,
+}
+
+/// A complete transaction, as needed to replace one of our own unconfirmed
+/// sends. Every field is bounded before it can reach the fee-bump logic.
+pub struct PrevTx {
+    pub txid: Txid,
+    /// Virtual size in vB, from the reported weight.
+    pub vsize: u64,
+    pub inputs: Vec<Utxo>,
+    pub outputs: Vec<PrevTxOut>,
+    pub confirmed: bool,
+}
+
+fn parse_full_tx(v: &Value) -> Result<PrevTx, String> {
+    let txid = v["txid"]
+        .as_str()
+        .and_then(|s| Txid::from_str(s).ok())
+        .ok_or("bad txid from server")?;
+    // Esplora reports weight; fall back to size for older servers.
+    let vsize = match v["weight"].as_u64() {
+        Some(w) => w.div_ceil(4),
+        None => v["size"].as_u64().ok_or("transaction has no size")?,
+    };
+    if vsize == 0 || vsize > 400_000 {
+        return Err("server returned an impossible transaction size".into());
+    }
+    let confirmed = v["status"]["confirmed"].as_bool().unwrap_or(false);
+    let vin = v["vin"].as_array().ok_or("transaction has no inputs")?;
+    let vout = v["vout"].as_array().ok_or("transaction has no outputs")?;
+    if vin.len() > 500 || vout.len() > 500 {
+        return Err("transaction has too many inputs or outputs".into());
+    }
+    let mut inputs = Vec::with_capacity(vin.len());
+    for i in vin {
+        if i["is_coinbase"].as_bool().unwrap_or(false) {
+            return Err("coinbase transactions cannot be replaced".into());
+        }
+        let txid = i["txid"]
+            .as_str()
+            .and_then(|s| Txid::from_str(s).ok())
+            .ok_or("input has no valid txid")?;
+        let vout_i = u32::try_from(i["vout"].as_u64().ok_or("input has no vout")?)
+            .map_err(|_| "input vout is out of range")?;
+        let value = i["prevout"]["value"]
+            .as_u64()
+            .ok_or("input has no previous value")?;
+        if value > network::MAX_MONEY_SATS {
+            return Err("input value exceeds the 21 million BTC supply".into());
+        }
+        let address = i["prevout"]["scriptpubkey_address"]
+            .as_str()
+            .ok_or("input has no previous address")?
+            .to_string();
+        inputs.push(Utxo {
+            txid,
+            vout: vout_i,
+            value,
+            address,
+        });
+    }
+    let mut outputs = Vec::with_capacity(vout.len());
+    for o in vout {
+        let value = o["value"].as_u64().ok_or("output has no value")?;
+        if value > network::MAX_MONEY_SATS {
+            return Err("output value exceeds the 21 million BTC supply".into());
+        }
+        outputs.push(PrevTxOut {
+            address: o["scriptpubkey_address"].as_str().map(str::to_string),
+            value,
+        });
+    }
+    let total_in = inputs
+        .iter()
+        .try_fold(0u64, |a, u| a.checked_add(u.value))
+        .ok_or("input total overflows")?;
+    let total_out = outputs
+        .iter()
+        .try_fold(0u64, |a, o| a.checked_add(o.value))
+        .ok_or("output total overflows")?;
+    if total_in < total_out {
+        return Err("transaction outputs exceed its inputs".into());
+    }
+    Ok(PrevTx {
+        txid,
+        vsize,
+        inputs,
+        outputs,
+        confirmed,
+    })
+}
+
+/// Fetch one transaction in full. The returned data is untrusted but bounded.
+pub fn full_tx(net: Net, txid: &str) -> Result<PrevTx, String> {
+    let txid = txid.trim();
+    if Txid::from_str(txid).is_err() {
+        return Err("not a valid transaction id".into());
+    }
+    let v = get(net, &format!("/tx/{txid}"))?;
+    parse_full_tx(&v)
+}
+
 pub fn utxos(net: Net, addr: &str) -> Result<Vec<Utxo>, String> {
     let v = get(net, &format!("/address/{addr}/utxo"))?;
     let mut out = vec![];

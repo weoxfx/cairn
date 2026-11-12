@@ -1,3 +1,4 @@
+mod bump;
 mod esplora;
 mod evm;
 mod evm_cli;
@@ -826,12 +827,13 @@ fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
             "↑  Send bitcoin",
             "↓  Receive",
             "☰  Transactions",
+            "⚡  Bump fee",
             "⟳  Refresh",
             "ⓘ  Wallet information",
             "⛨  Security check",
             "⏻  Lock and exit",
         ])
-        .unwrap_or(6);
+        .unwrap_or(7);
         if asked.elapsed() > IDLE_LOCK {
             banner();
             fail("Locked after 5 minutes of inactivity. Open the wallet again.");
@@ -864,7 +866,30 @@ fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
             },
             1 => receive_screen(watch, state.as_ref())?,
             2 => transactions_screen(watch.network(), state.as_ref())?,
-            3 => {
+            3 => match state.as_ref() {
+                None => {
+                    println!();
+                    fail("Not synced. Choose Refresh first.");
+                    pause();
+                }
+                Some(s) => match bump::bump_flow(name, fp, watch, s) {
+                    Ok(true) => match run_sync(watch, esplora::QUICK_GAP, state.as_ref()) {
+                        Ok(ns) => {
+                            state = Some(ns);
+                            synced_at = Some(Instant::now());
+                            last_err = None;
+                        }
+                        Err(e) => last_err = Some(e),
+                    },
+                    Ok(false) => {}
+                    Err(e) => {
+                        println!();
+                        fail(&e);
+                        pause();
+                    }
+                },
+            },
+            4 => {
                 // Quick re-check of everything known; falls back to a full scan if nothing is cached.
                 let gap = if state.is_some() {
                     esplora::QUICK_GAP
@@ -880,8 +905,8 @@ fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
                     Err(e) => last_err = Some(e),
                 }
             }
-            4 => info_screen(fp, watch)?,
-            5 => {
+            5 => info_screen(fp, watch)?,
+            6 => {
                 // Re-authenticates: proving the ciphertext still decrypts is the
                 // point of the integrity check, so the password is asked again.
                 if let Err(e) = security::check(name, false) {

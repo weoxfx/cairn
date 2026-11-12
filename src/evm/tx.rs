@@ -105,7 +105,7 @@ impl UnsignedTx {
         if body.len() > 2 * MAX_DATA_BYTES {
             return Err("calldata is too large".into());
         }
-        if body.len() % 2 != 0 {
+        if !body.len().is_multiple_of(2) {
             return Err("calldata has an odd number of hex digits".into());
         }
         hex::decode(body).map_err(|_| "calldata is not valid hex".to_string())

@@ -89,6 +89,11 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
   than 1,000,000 sats absolute, and a 1,000 sat/vB rate ceiling rejects hidden-fee estimates. Explicit
   `SEND` confirmation and deterministic signatures. Server-provided txids are validated before
   display.
+- **Fee bumping (RBF):** a replacement is built only from the original transaction's own inputs
+  and payment output. Every input must belong to the wallet, the recipient is re-derived and shown
+  again, the extra fee comes out of change (never the recipient's amount), change must stay above
+  dust, the replacement rate must beat the original by at least 0.5 sat/vB, and the absolute fee
+  and rate ceilings are re-applied to the signed replacement before broadcast.
 - **Offline signing:** `--offline` performs no network I/O. It rejects an already-signed PSBT,
   checks every input belongs to the loaded wallet with an `m/84'/coin'/0'/chain/index` key origin
   for the wallet's network and a matching P2WPKH script, rejects duplicate inputs and non-zero

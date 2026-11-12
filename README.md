@@ -217,6 +217,15 @@ The usual PSBT review still happens after scanning.
 - **Labels:** `cairn --label <TXID> "<label>"` stores a BIP329 `tx` record in
   `~/.cairn/labels.jsonl`; labels appear in the transaction list.
 
+## Bumping a pending payment
+
+If a send is stuck because fees rose, the dashboard's **Bump fee** entry replaces it (RBF) instead
+of sending again: same inputs, same recipient, same amount, and the additional fee comes out of
+your change. The replacement must pay at least 0.5 sat/vB more and a strictly higher absolute fee,
+it is refused when the change cannot cover the difference without going below dust, and the normal
+fee and rate ceilings still apply. Transactions with no change output, with more than one recipient,
+or with inputs from outside the wallet are refused rather than guessed at.
+
 ## EVM wallets
 
 One seed, two chains. An existing Cairn wallet derives its EVM account at
@@ -348,7 +357,8 @@ manifest. See [RELEASE-SIGNING.md](RELEASE-SIGNING.md) and [REPRODUCIBLE.md](REP
 - [x] EVM accounts from the same seed (Ethereum, Base, Arbitrum, OP, Polygon, Sepolia)
 - [x] ERC-20 balances with token names and USD values, EIP-1559 offline signing and broadcast
 - [x] Interactive EVM dashboard in the same shell as the Bitcoin wallet
-- [ ] 2-of-3 multisig, Electrum protocol, Taproot/BIP86, RBF fee bumping
+- [x] RBF fee bumping for unconfirmed sends, from the dashboard
+- [ ] 2-of-3 multisig, Electrum protocol, Taproot/BIP86
 - [ ] Windows support and packaged installers
 
 ## License

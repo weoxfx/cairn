@@ -509,7 +509,7 @@ fn token_cmd(args: &[String], json: bool) -> Result<(), String> {
                 );
             }
             println!();
-            return Ok(());
+            Ok(())
         }
         "add" => {
             let raw = o
@@ -563,7 +563,7 @@ fn token_cmd(args: &[String], json: bool) -> Result<(), String> {
                     chain.name, token.decimals
                 );
             }
-            return Ok(());
+            Ok(())
         }
         "remove" => {
             let raw = o
@@ -582,7 +582,7 @@ fn token_cmd(args: &[String], json: bool) -> Result<(), String> {
             } else {
                 println!("That token was not tracked on {}.", chain.name);
             }
-            return Ok(());
+            Ok(())
         }
         other => Err(format!(
             "unknown token command '{other}' (try: list, add, remove)"
