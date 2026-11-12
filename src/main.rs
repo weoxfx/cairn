@@ -172,8 +172,7 @@ fn descriptor(wallet: Option<String>, json: bool) -> Result<(), String> {
     let opened = unlock_wallet(&name)?;
     let network = opened.network;
     ui::set_network(network);
-    let watch =
-        Watch::from_mnemonic_with_passphrase(&opened.mnemonic, network, &opened.passphrase)?;
+    let watch = Watch::from_opened(&opened)?;
     let fp = opened.fingerprint.clone();
     drop(opened);
     let receive = watch.descriptor(0)?;
@@ -515,12 +514,29 @@ fn ask_network() -> Result<Network, String> {
     })
 }
 
+/// Which script type this wallet derives. Funds sit behind whichever addresses
+/// the wallet showed, so the choice is stored (and authenticated) in the wallet
+/// file rather than kept as a global preference.
+fn ask_address_type() -> Result<keystore::AddressType, String> {
+    println!();
+    let items = [
+        "Native SegWit (BIP84)  ·  bc1q…  accepted everywhere",
+        "Taproot (BIP86)  ·  bc1p…  cheaper to spend, key-path only",
+    ];
+    let refs = items.to_vec();
+    Ok(match menu(&refs)? {
+        0 => keystore::AddressType::P2wpkh,
+        _ => keystore::AddressType::P2tr,
+    })
+}
+
 fn create_wallet() -> Result<(), String> {
     banner();
     section("Create wallet");
     println!();
     let network = ask_network()?;
     ui::set_network(network);
+    let address_type = ask_address_type()?;
     let name = ask_name()?;
     let password = ask_new_password()?;
     let passphrase = ask_passphrase()?;
@@ -589,6 +605,7 @@ fn create_wallet() -> Result<(), String> {
             network,
             passphrase.as_ref().map(|p| p.as_str()),
             keystore::KdfParams::default_strong(),
+            address_type,
         )
     })?;
     let fp = keystore::fingerprint_with(
@@ -613,6 +630,7 @@ fn import_wallet() -> Result<(), String> {
     println!();
     let network = ask_network()?;
     ui::set_network(network);
+    let address_type = ask_address_type()?;
     let name = ask_name()?;
     let phrase = Zeroizing::new(
         Password::with_theme(&theme())
@@ -641,6 +659,7 @@ fn import_wallet() -> Result<(), String> {
             network,
             passphrase.as_ref().map(|p| p.as_str()),
             keystore::KdfParams::default_strong(),
+            address_type,
         )
     })?;
     ok(&format!(
@@ -735,8 +754,7 @@ fn open_wallet() -> Result<(), String> {
     let network = opened.network;
     ui::set_network(network);
     // Keep only the public account key; the seed is wiped from memory right here.
-    let watch =
-        Watch::from_mnemonic_with_passphrase(&opened.mnemonic, network, &opened.passphrase)?;
+    let watch = Watch::from_opened(&opened)?;
     let fp = opened.fingerprint.clone();
     drop(opened);
     dashboard(&name, &fp, &watch)
@@ -931,7 +949,7 @@ fn receive_screen(watch: &Watch, state: Option<&esplora::WalletState>) -> Result
             "Receiving address",
             &[
                 style(&addr).cyan().bold().to_string(),
-                style(wallet::derivation_path(network, 0, index))
+                style(wallet::derivation_path(network, watch.kind(), 0, index))
                     .dim()
                     .to_string(),
             ],
@@ -1129,6 +1147,7 @@ fn info_screen(fp: &str, watch: &Watch) -> Result<(), String> {
     println!();
     section("Watch-only descriptors (BIP84)");
     println!();
+    ui::kv("Addresses", watch.kind().label());
     ui::kv("Receive", &style(watch.descriptor(0)?).cyan().to_string());
     ui::kv("Change", &style(watch.descriptor(1)?).cyan().to_string());
     println!();

@@ -217,6 +217,19 @@ The usual PSBT review still happens after scanning.
 - **Labels:** `cairn --label <TXID> "<label>"` stores a BIP329 `tx` record in
   `~/.cairn/labels.jsonl`; labels appear in the transaction list.
 
+## Taproot (BIP86)
+
+A wallet is created (or imported) with one address type, and every address it hands out uses it:
+
+- **Native SegWit (BIP84)**, `m/84'/coin'/0'`, `bc1q…` — the default, accepted everywhere.
+- **Taproot (BIP86)**, `m/86'/coin'/0'`, `bc1p…` — key-path only, with cheaper spends.
+
+The choice is stored in the wallet file header and authenticated with the ciphertext, so neither
+an attacker nor a corrupted disk can switch a wallet to the other purpose without decryption
+failing. Spending a Taproot coin is a single-schnorr-signature key-path spend (BIP341/342,
+`SIGHASH_DEFAULT`); the send, fee-bump and offline PSBT flows all handle both script types, and
+fee estimates are per input/output type rather than a single average.
+
 ## Bumping a pending payment
 
 If a send is stuck because fees rose, the dashboard's **Bump fee** entry replaces it (RBF) instead

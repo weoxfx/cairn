@@ -10,9 +10,11 @@ use crate::network;
 use crate::qr;
 use crate::send;
 use crate::ui::{banner, boxed, fmt_btc, menu, ok, pause, section, spin};
-use crate::wallet::{parse_bip84_path, Signer, Watch};
+use crate::wallet::{parse_account_path, Signer, Watch};
 use bitcoin::bip32::{ChildNumber, Fingerprint};
+use bitcoin::key::XOnlyPublicKey;
 use bitcoin::psbt::Psbt;
+use bitcoin::secp256k1::Secp256k1;
 use bitcoin::{absolute::LockTime, Address, CompressedPublicKey, Network, ScriptBuf};
 use console::style;
 use dialoguer::Input;
@@ -52,8 +54,7 @@ pub fn create_psbt(wallet: Option<String>, out: Option<String>) -> Result<(), St
     let network = opened.network;
     crate::ui::set_network(network);
     let net = esplora::net_for(network)?;
-    let watch =
-        Watch::from_mnemonic_with_passphrase(&opened.mnemonic, network, &opened.passphrase)?;
+    let watch = Watch::from_opened(&opened)?;
     let fp = opened.fingerprint.clone();
     drop(opened);
 
@@ -160,8 +161,7 @@ pub fn sign_psbt(input: String, out: Option<String>) -> Result<(), String> {
     let opened = crate::unlock_wallet(&name)?;
     let network = opened.network;
     crate::ui::set_network(network);
-    let watch =
-        Watch::from_mnemonic_with_passphrase(&opened.mnemonic, network, &opened.passphrase)?;
+    let watch = Watch::from_opened(&opened)?;
     // The signer can only come from the wallet that was just authenticated.
     let signer = Signer::from_opened(&opened)?;
     drop(opened);
@@ -287,27 +287,55 @@ fn verify_psbt(
             .witness_utxo
             .as_ref()
             .ok_or_else(|| format!("input {i} has no witness UTXO"))?;
-        if !utxo.script_pubkey.is_p2wpkh() {
-            return Err(format!("input {i} is not a native SegWit P2WPKH output"));
-        }
-        let (pubkey, (fp, path)) = input
-            .bip32_derivation
-            .iter()
-            .next()
-            .ok_or_else(|| format!("input {i} has no BIP32 key origin"))?;
-        if *fp != master_fp {
-            return Err("PSBT belongs to a different wallet (fingerprint mismatch)".into());
-        }
-        let (chain, index) = parse_bip84_path(path, network)
-            .ok_or_else(|| format!("input {i} has an unexpected derivation path"))?;
-        let expected_script = ScriptBuf::new_p2wpkh(&CompressedPublicKey(*pubkey).wpubkey_hash());
-        if expected_script != utxo.script_pubkey {
-            return Err(format!("input {i}: key does not match the coin's script"));
-        }
-        let (mut derived_sk, derived_pubkey) = signer.key_at(chain, index)?;
-        derived_sk.non_secure_erase();
-        if derived_pubkey != *pubkey {
-            return Err(format!("input {i}: key does not match this wallet"));
+        if utxo.script_pubkey.is_p2tr() {
+            let internal = input
+                .tap_internal_key
+                .ok_or_else(|| format!("input {i} has no taproot internal key"))?;
+            let (xonly, (_, (fp, path))) = input
+                .tap_key_origins
+                .iter()
+                .next()
+                .ok_or_else(|| format!("input {i} has no taproot key origin"))?;
+            if *fp != master_fp {
+                return Err("PSBT belongs to a different wallet (fingerprint mismatch)".into());
+            }
+            let (_, chain, index) =
+                parse_account_path(path, network).map_err(|e| format!("input {i}: {e}"))?;
+            let expected = ScriptBuf::new_p2tr(&Secp256k1::verification_only(), *xonly, None);
+            if expected != utxo.script_pubkey || *xonly != internal {
+                return Err(format!("input {i}: key does not match the coin's script"));
+            }
+            let (mut derived_sk, derived_pubkey) = signer.key_at(chain, index)?;
+            derived_sk.non_secure_erase();
+            if XOnlyPublicKey::from(derived_pubkey) != *xonly {
+                return Err(format!("input {i}: key does not match this wallet"));
+            }
+        } else {
+            if !utxo.script_pubkey.is_p2wpkh() {
+                return Err(format!(
+                    "input {i} is not a native SegWit or Taproot output"
+                ));
+            }
+            let (pubkey, (fp, path)) = input
+                .bip32_derivation
+                .iter()
+                .next()
+                .ok_or_else(|| format!("input {i} has no BIP32 key origin"))?;
+            if *fp != master_fp {
+                return Err("PSBT belongs to a different wallet (fingerprint mismatch)".into());
+            }
+            let (_, chain, index) =
+                parse_account_path(path, network).map_err(|e| format!("input {i}: {e}"))?;
+            let expected_script =
+                ScriptBuf::new_p2wpkh(&CompressedPublicKey(*pubkey).wpubkey_hash());
+            if expected_script != utxo.script_pubkey {
+                return Err(format!("input {i}: key does not match the coin's script"));
+            }
+            let (mut derived_sk, derived_pubkey) = signer.key_at(chain, index)?;
+            derived_sk.non_secure_erase();
+            if derived_pubkey != *pubkey {
+                return Err(format!("input {i}: key does not match this wallet"));
+            }
         }
     }
 
@@ -524,6 +552,8 @@ fn ensure_same_unsigned(unsigned: &Psbt, signed: &Psbt) -> Result<(), String> {
             || u.non_witness_utxo != s.non_witness_utxo
             || u.bip32_derivation != s.bip32_derivation
             || u.sighash_type != s.sighash_type
+            || u.tap_internal_key != s.tap_internal_key
+            || u.tap_key_origins != s.tap_key_origins
         {
             return Err(format!("signed PSBT changed input {i}. Nothing was sent."));
         }
@@ -541,7 +571,9 @@ fn psbt_network(psbt: &Psbt) -> Result<Network, String> {
         for (_, path) in input.bip32_derivation.values() {
             let parts: Vec<&ChildNumber> = path.into_iter().collect();
             let coin = match parts.as_slice() {
-                [ChildNumber::Hardened { index: 84 }, ChildNumber::Hardened { index: coin }, ..] => {
+                [ChildNumber::Hardened { index: purpose }, ChildNumber::Hardened { index: coin }, ..]
+                    if *purpose == 84 || *purpose == 86 =>
+                {
                     *coin
                 }
                 _ => continue,
@@ -693,6 +725,7 @@ mod tests {
     use super::*;
     use crate::esplora::{Utxo, WalletState};
     use crate::send::{build_psbt, keymap, plan};
+    use crate::wallet::parse_bip84_path;
     use bip39::Mnemonic;
     use bitcoin::bip32::DerivationPath;
     use bitcoin::hashes::Hash;

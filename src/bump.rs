@@ -15,10 +15,9 @@ use bitcoin::Address;
 use console::style;
 use dialoguer::Input;
 
-/// P2WPKH dust threshold, the same value the send flow uses.
-const DUST: u64 = 294;
-/// Signatures vary by a byte, so the change output may need adjusting after
-/// signing to still hit the requested fee.
+/// Smallest change worth keeping. Covers both the P2WPKH (294 sat) and Taproot
+/// (330 sat) dust limits, so a replacement never creates unspendable change.
+const MIN_CHANGE: u64 = 330;
 const MAX_ADJUST: usize = 4;
 /// Nodes want the replacement to pay a strictly higher rate, not just a higher
 /// absolute fee.
@@ -67,10 +66,10 @@ pub(crate) fn plan_bump(
         return Err("The replacement fee must be higher than the original".into());
     }
     let delta = fee - old_fee;
-    if change < delta + DUST {
+    if change < delta + MIN_CHANGE {
         return Err(format!(
             "Not enough change: paying {} sats more would leave less than the {} sat dust limit",
-            delta, DUST
+            delta, MIN_CHANGE
         ));
     }
     Ok(Bump {
@@ -274,7 +273,7 @@ pub fn bump_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
     let mut change_now = bump.change;
     let mut signed: Option<bitcoin::Transaction> = None;
     for _ in 0..MAX_ADJUST {
-        if change_now < DUST {
+        if change_now < MIN_CHANGE {
             return Err("Not enough change left to reach that fee rate".into());
         }
         let p = plan(change_now, bump.fee);
@@ -300,7 +299,7 @@ pub fn bump_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
             break;
         }
         let gap = bump.fee - fee;
-        if change_now < gap + DUST {
+        if change_now < gap + MIN_CHANGE {
             return Err("Not enough change to reach that fee rate".into());
         }
         change_now -= gap;
@@ -355,8 +354,9 @@ mod tests {
         // Only 1,000 sats of change: a 1,000 sat increase leaves nothing for dust.
         let err = plan_bump(1_000, 200, 1_000, 10.0).unwrap_err();
         assert!(err.contains("dust"), "{err}");
-        assert!(plan_bump(1_000, 200, 1_294, 10.0).is_ok());
-        assert!(plan_bump(1_000, 200, 1_293, 10.0).is_err());
+        // The floor is 330 sats, which covers Taproot change too.
+        assert!(plan_bump(1_000, 200, 1_330, 10.0).is_ok());
+        assert!(plan_bump(1_000, 200, 1_329, 10.0).is_err());
     }
 
     #[test]

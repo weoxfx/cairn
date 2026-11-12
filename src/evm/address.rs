@@ -252,6 +252,7 @@ mod tests {
             passphrase: Zeroizing::new(String::new()),
             fingerprint: "73c5da0a".into(),
             network: bitcoin::Network::Bitcoin,
+            address_type: keystore::AddressType::P2wpkh,
         };
         let watch = EvmWatch::from_opened(&opened).unwrap();
         let signer = EvmSigner::from_opened(&opened).unwrap();

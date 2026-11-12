@@ -50,16 +50,34 @@ pub fn check_structure(psbt: &Psbt) -> Result<(u64, u64), String> {
         {
             return Err("this PSBT is already signed".into());
         }
-        if !matches!(input.ecdsa_hash_ty(), Ok(EcdsaSighashType::All)) {
-            return Err(format!("input {i} does not use SIGHASH_ALL"));
-        }
-        if input.bip32_derivation.len() != 1 {
-            return Err(format!("input {i} must have exactly one BIP32 key origin"));
-        }
         let utxo = input
             .witness_utxo
             .as_ref()
             .ok_or_else(|| format!("input {i} has no witness UTXO"))?;
+        if utxo.script_pubkey.is_p2tr() {
+            // BIP371 taproot input: one key-path origin and an internal key.
+            if input.tap_key_origins.len() != 1 {
+                return Err(format!(
+                    "input {i} must have exactly one taproot key origin"
+                ));
+            }
+            if input.tap_internal_key.is_none() {
+                return Err(format!("input {i} has no taproot internal key"));
+            }
+            let (_xonly, (leaves, _)) = input.tap_key_origins.iter().next().unwrap();
+            if !leaves.is_empty() {
+                return Err(format!(
+                    "input {i} spends a taproot script path, which Cairn cannot sign"
+                ));
+            }
+        } else {
+            if !matches!(input.ecdsa_hash_ty(), Ok(EcdsaSighashType::All)) {
+                return Err(format!("input {i} does not use SIGHASH_ALL"));
+            }
+            if input.bip32_derivation.len() != 1 {
+                return Err(format!("input {i} must have exactly one BIP32 key origin"));
+            }
+        }
         if utxo.value.to_sat() > network::MAX_MONEY_SATS {
             return Err(format!("input {i} value exceeds the 21 million BTC supply"));
         }

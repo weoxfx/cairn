@@ -1,5 +1,6 @@
 //! Send flow: validate address -> amount -> fee -> review -> type SEND -> password -> sign -> broadcast.
-//! Native SegWit (P2WPKH) inputs only. Deterministic (RFC6979) ECDSA signing via libsecp256k1.
+//! Spends native SegWit (P2WPKH, ECDSA) and Taproot (P2TR, key-path schnorr) coins;
+//! all signing is deterministic and done by libsecp256k1.
 
 use crate::esplora::{self, Utxo, WalletState};
 use crate::network;
@@ -9,19 +10,20 @@ use bitcoin::absolute::LockTime;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::bip32::{DerivationPath, Fingerprint};
 use bitcoin::ecdsa::Signature;
+use bitcoin::hashes::Hash;
+use bitcoin::key::XOnlyPublicKey;
 use bitcoin::psbt::Psbt;
-use bitcoin::secp256k1::{Message, Secp256k1};
-use bitcoin::sighash::SighashCache;
+use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
+use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
 use bitcoin::transaction::Version;
 use bitcoin::{
     Address, Amount, CompressedPublicKey, Denomination, EcdsaSighashType, Network, OutPoint,
-    ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+    Script, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
 };
 use console::style;
 use dialoguer::{Confirm, Input, MultiSelect};
 use std::collections::{HashMap, HashSet};
 
-const DUST: u64 = 294; // P2WPKH dust threshold in sats
 const MAX_MONEY: u64 = network::MAX_MONEY_SATS;
 const TYPICAL_VBYTES: u64 = 141; // 1 input + 2 outputs, for fee previews
 const MAX_FEE_SATS: u64 = 1_000_000; // hard ceiling: 0.01 BTC
@@ -68,11 +70,55 @@ pub fn parse_amount(s: &str) -> Result<Option<u64>, String> {
     Ok(Some(sats))
 }
 
-// ---------- planning ----------
+// ---------- script + size helpers ----------
 
-fn vsize(inputs: usize, outputs: usize) -> u64 {
-    (11 + 68 * inputs + 31 * outputs) as u64
+/// Dust threshold for an output of this script type. Below it the output is
+/// unspendable by relay policy, so change that small is given to the fee instead
+/// and payments that small are refused.
+pub fn dust_limit(spk: &Script) -> u64 {
+    if spk.is_p2wpkh() {
+        294
+    } else {
+        330
+    }
 }
+
+/// Script of an address string. Only the script shape is needed for sizing and
+/// signing; the network binding is enforced by [`parse_address`] wherever an
+/// address is accepted from outside.
+pub fn script_of(addr: &str) -> Result<ScriptBuf, String> {
+    let a: Address<NetworkUnchecked> = addr
+        .parse()
+        .map_err(|e| format!("Not a valid Bitcoin address: {e}"))?;
+    Ok(a.assume_checked().script_pubkey())
+}
+
+fn input_vbytes(spk: &Script) -> u64 {
+    if spk.is_p2tr() {
+        58 // one 64-byte schnorr signature
+    } else {
+        68 // ECDSA signature + compressed pubkey
+    }
+}
+
+fn output_vbytes(spk: &Script) -> u64 {
+    8 + 1 + spk.len() as u64 // value + length prefix + script
+}
+
+/// Size estimate for this concrete set of coins and outputs. Under-estimating a
+/// fee is what strands a transaction, so every value above is a slight over-estimate.
+fn tx_vbytes(inputs: &[Utxo], outputs: &[ScriptBuf]) -> Result<u64, String> {
+    let mut v = 11u64;
+    for u in inputs {
+        v += input_vbytes(&script_of(&u.address)?);
+    }
+    for spk in outputs {
+        v += output_vbytes(spk);
+    }
+    Ok(v)
+}
+
+// ---------- planning ----------
 
 fn fee_for(rate: f64, vbytes: u64) -> u64 {
     (rate * vbytes as f64).ceil() as u64
@@ -148,8 +194,9 @@ pub fn plan(
             if total > MAX_MONEY {
                 return Err("input total exceeds the 21 million BTC supply".into());
             }
-            let fee = fee_for(rate, vsize(utxos.len(), 1));
-            if utxos.is_empty() || total < fee + DUST {
+            let to_spk = to.script_pubkey();
+            let fee = fee_for(rate, tx_vbytes(&utxos, std::slice::from_ref(&to_spk))?);
+            if utxos.is_empty() || total < fee + dust_limit(&to_spk) {
                 return Err("Balance is too small to cover the fee".into());
             }
             let amount = total - fee;
@@ -164,8 +211,11 @@ pub fn plan(
             })
         }
         Some(amt) => {
-            if amt < DUST {
-                return Err(format!("Amount is below the dust limit ({DUST} sats)"));
+            let to_spk = to.script_pubkey();
+            let change_spk = change_addr.script_pubkey();
+            let dust = dust_limit(&to_spk);
+            if amt < dust {
+                return Err(format!("Amount is below the dust limit ({dust} sats)"));
             }
             let mut sel: Vec<Utxo> = vec![];
             let mut sum = 0u64;
@@ -175,9 +225,12 @@ pub fn plan(
                     return Err("input total exceeds the 21 million BTC supply".into());
                 }
                 sel.push(u);
-                let fee_change = fee_for(rate, vsize(sel.len(), 2));
-                let fee_plain = fee_for(rate, vsize(sel.len(), 1));
-                if sum >= amt + fee_change && sum - amt - fee_change >= DUST {
+                let fee_change = fee_for(
+                    rate,
+                    tx_vbytes(&sel, &[to_spk.clone(), change_spk.clone()])?,
+                );
+                let fee_plain = fee_for(rate, tx_vbytes(&sel, std::slice::from_ref(&to_spk))?);
+                if sum >= amt + fee_change && sum - amt - fee_change >= dust_limit(&change_spk) {
                     let change = sum - amt - fee_change;
                     check_fee(fee_change, amt)?;
                     return Ok(Plan {
@@ -314,18 +367,33 @@ pub fn build_psbt(
         let (chain, index) = *keymap
             .get(&u.address)
             .ok_or("coin belongs to an unknown address")?;
-        let path: DerivationPath = derivation_path(watch.network(), chain, index)
+        let path: DerivationPath = derivation_path(watch.network(), watch.kind(), chain, index)
             .parse()
             .map_err(|e: bitcoin::bip32::Error| e.to_string())?;
+        // The coin must sit on exactly the script our derivation says it does.
+        let spk = watch.script_at(chain, index)?;
+        if spk != parse_address(&u.address, watch.network())?.script_pubkey() {
+            return Err("coin does not match this wallet's derivation".into());
+        }
         let input = &mut psbt.inputs[i];
         input.witness_utxo = Some(TxOut {
             value: Amount::from_sat(u.value),
-            script_pubkey: parse_address(&u.address, watch.network())?.script_pubkey(),
+            script_pubkey: spk.clone(),
         });
-        input
-            .bip32_derivation
-            .insert(watch.pubkey_at(chain, index)?, (master_fp, path));
-        input.sighash_type = Some(EcdsaSighashType::All.into());
+        if spk.is_p2tr() {
+            // BIP371: taproot inputs carry an internal key and taproot key
+            // origins, not legacy BIP32 derivations.
+            let xonly = XOnlyPublicKey::from(watch.pubkey_at(chain, index)?);
+            input.tap_internal_key = Some(xonly);
+            input
+                .tap_key_origins
+                .insert(xonly, (vec![], (master_fp, path)));
+        } else {
+            input
+                .bip32_derivation
+                .insert(watch.pubkey_at(chain, index)?, (master_fp, path));
+            input.sighash_type = Some(EcdsaSighashType::All.into());
+        }
     }
     Ok(psbt)
 }
@@ -338,32 +406,64 @@ pub fn sign(
     keymap: &HashMap<String, (u32, u32)>,
 ) -> Result<(), String> {
     let secp = Secp256k1::new();
+
+    // Taproot sighashes commit to every input's value and script, so all the
+    // prevouts are needed up front. They come from the coins being spent, not
+    // from the network.
+    let mut prevouts = Vec::with_capacity(p.inputs.len());
+    for u in &p.inputs {
+        let spk = parse_address(&u.address, signer.network())?.script_pubkey();
+        prevouts.push(TxOut {
+            value: Amount::from_sat(u.value),
+            script_pubkey: spk,
+        });
+    }
+
     let mut cache = SighashCache::new(&mut *tx);
     for (i, u) in p.inputs.iter().enumerate() {
-        let (chain, idx) = keymap
+        let (chain, idx) = *keymap
             .get(&u.address)
             .ok_or("coin belongs to an unknown address")?;
-        let (sig, pk) = {
-            let spk = parse_address(&u.address, signer.network())?.script_pubkey();
-            let sighash = cache
-                .p2wpkh_signature_hash(i, &spk, Amount::from_sat(u.value), EcdsaSighashType::All)
-                .map_err(|e| e.to_string())?;
-            let (mut sk, pk) = signer.key_at(*chain, *idx)?;
+        let spk = &prevouts[i].script_pubkey;
+        if spk.is_p2tr() {
+            let (mut sk, pk) = signer.key_at(chain, idx)?;
             // The key we derived must really be the one that locks this coin.
-            let expected = ScriptBuf::new_p2wpkh(&CompressedPublicKey(pk).wpubkey_hash());
-            if expected != spk {
+            let xonly = XOnlyPublicKey::from(pk);
+            if ScriptBuf::new_p2tr(&secp, xonly, None) != *spk {
+                sk.non_secure_erase();
+                return Err("internal check failed: key does not match coin".into());
+            }
+            let sighash = cache
+                .taproot_key_spend_signature_hash(
+                    i,
+                    &Prevouts::All(&prevouts),
+                    TapSighashType::Default,
+                )
+                .map_err(|e| e.to_string())?;
+            let keypair = Keypair::from_secret_key(&secp, &sk);
+            sk.non_secure_erase();
+            let sig = secp
+                .sign_schnorr_no_aux_rand(&Message::from_digest(sighash.to_byte_array()), &keypair);
+            let mut witness = Witness::new();
+            witness.push(sig.as_ref());
+            *cache.witness_mut(i).ok_or("witness slot missing")? = witness;
+        } else {
+            let sighash = cache
+                .p2wpkh_signature_hash(i, spk, prevouts[i].value, EcdsaSighashType::All)
+                .map_err(|e| e.to_string())?;
+            let (mut sk, pk) = signer.key_at(chain, idx)?;
+            if ScriptBuf::new_p2wpkh(&CompressedPublicKey(pk).wpubkey_hash()) != *spk {
                 sk.non_secure_erase();
                 return Err("internal check failed: key does not match coin".into());
             }
             let sig = secp.sign_ecdsa(&Message::from(sighash), &sk);
             sk.non_secure_erase();
-            (sig, pk)
-        };
-        let signature = Signature {
-            signature: sig,
-            sighash_type: EcdsaSighashType::All,
-        };
-        *cache.witness_mut(i).ok_or("witness slot missing")? = Witness::p2wpkh(&signature, &pk);
+            let signature = Signature {
+                signature: sig,
+                sighash_type: EcdsaSighashType::All,
+            };
+            *cache.witness_mut(i).ok_or("witness slot missing")? = Witness::p2wpkh(&signature, &pk);
+        }
     }
     Ok(())
 }
@@ -577,6 +677,9 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
     drop(opened);
     if signer.account_xpub()? != watch.xpub_string() {
         return Err("Keys do not match this wallet session. Nothing was sent.".into());
+    }
+    if signer.kind() != watch.kind() {
+        return Err("Wallet address type changed during this session. Nothing was sent.".into());
     }
 
     let mut tx = build_tx(&p);
@@ -814,6 +917,110 @@ mod tests {
         bad.insert(a0, (0u32, 5u32));
         let mut tx2 = build_tx(&p);
         assert!(sign(&mut tx2, &p, &signer, &bad).is_err());
+    }
+
+    fn taproot_fixture() -> (Watch, Signer, String, Address, Address) {
+        let m = Mnemonic::parse(ABANDON).unwrap();
+        let kind = crate::keystore::AddressType::P2tr;
+        let watch = Watch::with_kind(&m, Network::Bitcoin, "", kind).unwrap();
+        let signer = Signer::from_mnemonic_with_kind(&m, Network::Bitcoin, kind).unwrap();
+        let a0 = watch.address_at(0, 0).unwrap();
+        let to = parse_address(&watch.address_at(0, 1).unwrap(), Network::Bitcoin).unwrap();
+        let change = parse_address(&watch.address_at(1, 0).unwrap(), Network::Bitcoin).unwrap();
+        (watch, signer, a0, to, change)
+    }
+
+    #[test]
+    fn taproot_spend_signs_with_schnorr_and_verifies() {
+        let (_watch, signer, a0, to, change) = taproot_fixture();
+        assert!(a0.starts_with("bc1p"));
+        let mut keymap = HashMap::new();
+        keymap.insert(a0.clone(), (0u32, 0u32));
+        let p = plan(vec![utxo(100_000, &a0)], to, Some(30_000), 2.0, change).unwrap();
+
+        let mut tx = build_tx(&p);
+        sign(&mut tx, &p, &signer, &keymap).unwrap();
+
+        // Key-path spend: one 64-byte schnorr signature and nothing else.
+        let witness = &tx.input[0].witness;
+        assert_eq!(witness.len(), 1);
+        let raw = witness.nth(0).unwrap();
+        assert_eq!(raw.len(), 64, "SIGHASH_DEFAULT must not append a byte");
+
+        // Independently recompute the BIP341 sighash and verify the signature.
+        let secp = Secp256k1::new();
+        let spk = script_of(&a0).unwrap();
+        let prevouts = vec![TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: spk,
+        }];
+        let mut cache = SighashCache::new(&tx);
+        let h = cache
+            .taproot_key_spend_signature_hash(0, &Prevouts::All(&prevouts), TapSighashType::Default)
+            .unwrap();
+        let xonly = XOnlyPublicKey::from(signer.key_at(0, 0).unwrap().1);
+        let sig = bitcoin::taproot::Signature::from_slice(raw).unwrap();
+        secp.verify_schnorr(
+            &sig.signature,
+            &Message::from_digest(h.to_byte_array()),
+            &xonly,
+        )
+        .unwrap();
+
+        // The fee must still cover the signed transaction, and a key that does not
+        // lock the coin must be refused rather than silently used.
+        assert!(p.fee >= tx.vsize() as u64);
+        let mut bad = HashMap::new();
+        bad.insert(a0, (0u32, 9u32));
+        let mut tx2 = build_tx(&p);
+        assert!(sign(&mut tx2, &p, &signer, &bad).is_err());
+    }
+
+    #[test]
+    fn taproot_dust_is_330_sats() {
+        let (_watch, _signer, a0, to, change) = taproot_fixture();
+        // 320 sats of change is below the Taproot dust limit, so it becomes fee.
+        let p = plan(
+            vec![utxo(30_320, &a0)],
+            to.clone(),
+            Some(30_000),
+            1.0,
+            change.clone(),
+        )
+        .unwrap();
+        assert!(p.change.is_none());
+        assert_eq!(p.fee, 320);
+
+        // The same leftover is ordinary change for a P2WPKH recipient... which it is
+        // not here: both the payment and the change are Taproot, so it is refused.
+        assert!(plan(
+            vec![utxo(30_329, &a0)],
+            to,
+            Some(30_000),
+            1.0,
+            change.clone()
+        )
+        .unwrap()
+        .change
+        .is_none());
+    }
+
+    #[test]
+    fn taproot_psbt_carries_bip371_fields() {
+        let (watch, signer, a0, to, change) = taproot_fixture();
+        let mut keymap = HashMap::new();
+        keymap.insert(a0.clone(), (0u32, 0u32));
+        let p = plan(vec![utxo(100_000, &a0)], to, Some(30_000), 2.0, change).unwrap();
+        let mut psbt = build_psbt(&p, &watch, &keymap, signer.fingerprint()).unwrap();
+        assert!(psbt.inputs[0].bip32_derivation.is_empty());
+        assert!(psbt.inputs[0].tap_internal_key.is_some());
+        assert_eq!(psbt.inputs[0].tap_key_origins.len(), 1);
+        crate::psbt_guard::check_structure(&psbt).unwrap();
+
+        signer.sign_psbt(&mut psbt).unwrap();
+        let tx = psbt.clone().extract_tx().unwrap();
+        assert_eq!(tx.input[0].witness.len(), 1);
+        assert_eq!(tx.input[0].witness.nth(0).unwrap().len(), 64);
     }
 
     /// Sending from a wallet with a BIP39 passphrase must use the same seed the

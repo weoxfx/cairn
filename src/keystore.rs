@@ -44,6 +44,50 @@ impl KdfParams {
     }
 }
 
+/// Address format a wallet derives. Stored in the header of a v4 file and
+/// authenticated along with the rest of the metadata, so a tampered file cannot
+/// silently change which addresses (or which derivation purpose) the wallet uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AddressType {
+    /// BIP84, `m/84'/coin'/0'` — `bc1q…` / `tb1q…`.
+    #[default]
+    P2wpkh,
+    /// BIP86 key-path only, `m/86'/coin'/0'` — `bc1p…` / `tb1p…`.
+    P2tr,
+}
+
+impl AddressType {
+    pub fn id(self) -> &'static str {
+        match self {
+            AddressType::P2wpkh => "p2wpkh",
+            AddressType::P2tr => "p2tr",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AddressType::P2wpkh => "Native SegWit (BIP84)",
+            AddressType::P2tr => "Taproot (BIP86)",
+        }
+    }
+
+    /// BIP purpose used in the derivation path.
+    pub fn purpose(self) -> u32 {
+        match self {
+            AddressType::P2wpkh => 84,
+            AddressType::P2tr => 86,
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "p2wpkh" => Ok(AddressType::P2wpkh),
+            "p2tr" => Ok(AddressType::P2tr),
+            _ => Err("unsupported address type".into()),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Keystore {
     pub version: u32,
@@ -58,6 +102,10 @@ pub struct Keystore {
     /// itself is never stored; it is required again on every unlock.
     #[serde(default)]
     pub passphrase: bool,
+    /// v4 only: `p2wpkh` or `p2tr`. Files written before v4 were always BIP84 and
+    /// default to `p2wpkh`.
+    #[serde(default)]
+    pub address_type: Option<String>,
 }
 
 /// A successfully decrypted wallet. The mnemonic and passphrase live in locked
@@ -71,6 +119,8 @@ pub struct Opened {
     pub(crate) passphrase: Zeroizing<String>,
     pub fingerprint: String,
     pub network: Network,
+    /// Authenticated address format of this wallet.
+    pub address_type: AddressType,
 }
 
 impl Drop for Opened {
@@ -142,6 +192,33 @@ fn aad_v3(
         hex::encode(salt),
         hex::encode(nonce),
         if passphrase { "true" } else { "false" }
+    )
+    .into_bytes())
+}
+
+/// v4 binds the address type as well: switching a wallet between BIP84 and BIP86
+/// in the header makes decryption fail instead of showing other addresses.
+fn aad_v4(
+    network: Network,
+    fingerprint: &str,
+    p: &KdfParams,
+    salt: &[u8],
+    nonce: &[u8],
+    passphrase: bool,
+    address_type: AddressType,
+) -> Result<Vec<u8>, String> {
+    Ok(format!(
+        "cairn-keystore-v4\nnetwork={}\nfingerprint={fingerprint}\nkdf=argon2id\n\
+         memory_kib={}\niterations={}\nparallelism={}\nsalt={}\nnonce={}\npassphrase={}\n\
+         address_type={}\n",
+        network_id(network)?,
+        p.memory_kib,
+        p.iterations,
+        p.parallelism,
+        hex::encode(salt),
+        hex::encode(nonce),
+        if passphrase { "true" } else { "false" },
+        address_type.id()
     )
     .into_bytes())
 }
@@ -265,11 +342,22 @@ pub fn save_with(
     network: Network,
     params: KdfParams,
 ) -> Result<(), String> {
-    save_with_passphrase(name, password, mnemonic, network, None, params)
+    save_with_passphrase(
+        name,
+        password,
+        mnemonic,
+        network,
+        None,
+        params,
+        AddressType::P2wpkh,
+    )
 }
 
-/// Save a wallet with an optional BIP39 passphrase. A non-empty passphrase
-/// writes a v3 file that requires the same passphrase on every unlock.
+/// Save a wallet with an optional BIP39 passphrase and an address format.
+///
+/// New wallets are always written as v4, which authenticates the network, the
+/// fingerprint, the KDF parameters, whether a BIP39 passphrase is in use, and the
+/// address type (BIP84 or BIP86).
 pub fn save_with_passphrase(
     name: &str,
     password: &str,
@@ -277,6 +365,7 @@ pub fn save_with_passphrase(
     network: Network,
     passphrase: Option<&str>,
     params: KdfParams,
+    address_type: AddressType,
 ) -> Result<(), String> {
     let passphrase = passphrase.filter(|p| !p.is_empty());
     let path = wallet_path(name)?;
@@ -289,12 +378,16 @@ pub fn save_with_passphrase(
     let nonce = random_bytes::<12>()?;
     let key = derive_key(password, &salt, &params)?;
     let fp = fingerprint_with(mnemonic, network, passphrase.unwrap_or(""))?;
-    let version = if passphrase.is_some() { 3 } else { 2 };
-    let aad = if version == 3 {
-        aad_v3(network, &fp, &params, &salt, &nonce, true)?
-    } else {
-        aad_v2(network, &fp, &params, &salt, &nonce)?
-    };
+    let version = 4;
+    let aad = aad_v4(
+        network,
+        &fp,
+        &params,
+        &salt,
+        &nonce,
+        passphrase.is_some(),
+        address_type,
+    )?;
 
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_ref()));
     let ciphertext = cipher
@@ -317,6 +410,7 @@ pub fn save_with_passphrase(
         fingerprint: fp,
         network: network_id(network)?.into(),
         passphrase: passphrase.is_some(),
+        address_type: Some(address_type.id().into()),
     };
     let json = serde_json::to_vec_pretty(&ks).map_err(|e| e.to_string())?;
 
@@ -477,7 +571,7 @@ pub fn open_with(name: &str, password: &str, passphrase: Option<&str>) -> Result
     let key = derive_key(password, &salt, &ks.kdf_params)?;
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_ref()));
 
-    let (plain, network) = match ks.version {
+    let (plain, network, address_type) = match ks.version {
         // v1 existed before mainnet support and was always testnet. Its AAD does
         // not bind the network, so only accept it as testnet.
         1 => {
@@ -493,7 +587,7 @@ pub fn open_with(name: &str, password: &str, passphrase: Option<&str>) -> Result
                     },
                 )
                 .map_err(|_| bad())?;
-            (plain, Network::Testnet)
+            (plain, Network::Testnet, AddressType::P2wpkh)
         }
         2 => {
             if supplied || ks.passphrase {
@@ -510,7 +604,7 @@ pub fn open_with(name: &str, password: &str, passphrase: Option<&str>) -> Result
                     },
                 )
                 .map_err(|_| bad())?;
-            (plain, network)
+            (plain, network, AddressType::P2wpkh)
         }
         3 => {
             if !ks.passphrase {
@@ -537,7 +631,37 @@ pub fn open_with(name: &str, password: &str, passphrase: Option<&str>) -> Result
                     },
                 )
                 .map_err(|_| bad())?;
-            (plain, network)
+            (plain, network, AddressType::P2wpkh)
+        }
+        4 => {
+            let network = parse_network(&ks.network)?;
+            // The passphrase is never stored; whether one was used is
+            // authenticated, so a caller cannot skip it (or add one).
+            if supplied != ks.passphrase {
+                return Err("this wallet has a different BIP39 passphrase requirement".into());
+            }
+            // A v4 file must name its address type; a missing or unknown value
+            // means the header was damaged, so refuse rather than guess.
+            let address_type = AddressType::parse(ks.address_type.as_deref().ok_or_else(bad)?)?;
+            let aad = aad_v4(
+                network,
+                &ks.fingerprint,
+                &ks.kdf_params,
+                &salt,
+                &nonce,
+                passphrase.is_some(),
+                address_type,
+            )?;
+            let plain = cipher
+                .decrypt(
+                    Nonce::from_slice(&nonce),
+                    Payload {
+                        msg: &ct,
+                        aad: &aad,
+                    },
+                )
+                .map_err(|_| bad())?;
+            (plain, network, address_type)
         }
         _ => return Err("unsupported wallet version or network".into()),
     };
@@ -562,6 +686,7 @@ pub fn open_with(name: &str, password: &str, passphrase: Option<&str>) -> Result
         passphrase: opened_pass,
         fingerprint: fp,
         network,
+        address_type,
     })
 }
 
@@ -748,6 +873,7 @@ mod tests {
             fingerprint: fingerprint(&m, Network::Testnet).unwrap(),
             network: "testnet".into(),
             passphrase: false,
+            address_type: None,
         };
         fs::create_dir_all(wallet_dir().unwrap()).unwrap();
         fs::write(
@@ -764,13 +890,53 @@ mod tests {
     }
 
     #[test]
+    fn taproot_wallet_round_trips_and_binds_address_type() {
+        let dir = test_home("v4");
+        let pw = "a strong wallet password";
+        let m = Mnemonic::from_entropy(&[9u8; 32]).unwrap();
+        save_with_passphrase(
+            "t1",
+            pw,
+            &m,
+            Network::Bitcoin,
+            None,
+            fast(),
+            AddressType::P2tr,
+        )
+        .unwrap();
+        assert_eq!(inspect("t1").unwrap().version, 4);
+        let opened = open("t1", pw).unwrap();
+        assert_eq!(opened.address_type, AddressType::P2tr);
+        assert_eq!(opened.mnemonic.to_string(), m.to_string());
+
+        // Editing the header to a different address type must fail the AAD check
+        // instead of quietly switching the wallet to BIP84 addresses.
+        let path = wallet_path("t1").unwrap();
+        let data = fs::read_to_string(&path).unwrap();
+        assert!(data.contains("\"p2tr\""));
+        fs::write(&path, data.replace("p2tr", "p2wpkh")).unwrap();
+        assert!(open("t1", pw).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn passphrase_wallet_requires_and_authenticates_passphrase() {
         let dir = test_home("passphrase");
         let pw = "a strong wallet password";
         let pass = "correct horse battery staple";
         let m = Mnemonic::from_entropy(&[33u8; 32]).unwrap();
 
-        save_with_passphrase("p1", pw, &m, Network::Bitcoin, Some(pass), fast()).unwrap();
+        save_with_passphrase(
+            "p1",
+            pw,
+            &m,
+            Network::Bitcoin,
+            Some(pass),
+            fast(),
+            AddressType::P2wpkh,
+        )
+        .unwrap();
         assert!(requires_passphrase("p1").unwrap());
 
         let opened = open_with("p1", pw, Some(pass)).unwrap();

@@ -1,16 +1,20 @@
-//! Key derivation: BIP39 seed -> BIP32 -> BIP84 (native SegWit, bech32 addresses).
-//! Path: m/84'/coin'/0'/chain/index   (coin 0 = mainnet, 1 = testnet; chain 0 = receive, 1 = change)
+//! Key derivation: BIP39 seed -> BIP32 -> BIP84 (native SegWit) or BIP86 (Taproot).
+//! Path: m/84'|86'/coin'/0'/chain/index  (coin 0 = mainnet, 1 = testnet;
+//! chain 0 = receive, 1 = change). The wallet's address type is stored in the
+//! keystore header and authenticated, so it cannot be swapped behind your back.
 //!
 //! After unlock we keep only a `Watch` (account xpub). The seed is dropped, so the
 //! network code never has access to anything that can spend.
 
-use crate::keystore;
+use crate::keystore::{self, AddressType};
 use bip39::Mnemonic;
 use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpriv, Xpub};
+use bitcoin::hashes::Hash;
+use bitcoin::key::XOnlyPublicKey;
 use bitcoin::psbt::Psbt;
-use bitcoin::secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
-use bitcoin::sighash::SighashCache;
-use bitcoin::{Address, CompressedPublicKey, EcdsaSighashType, Network, ScriptBuf, Witness};
+use bitcoin::secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
+use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
+use bitcoin::{Address, CompressedPublicKey, EcdsaSighashType, Network, ScriptBuf, TxOut, Witness};
 use std::str::FromStr;
 use zeroize::Zeroizing;
 
@@ -22,19 +26,48 @@ pub fn coin_type(network: Network) -> u32 {
     }
 }
 
-pub fn derivation_path(network: Network, chain: u32, index: u32) -> String {
-    format!("m/84'/{}'/0'/{chain}/{index}", coin_type(network))
+pub fn derivation_path(network: Network, kind: AddressType, chain: u32, index: u32) -> String {
+    format!(
+        "m/{}'/{}'/0'/{chain}/{index}",
+        kind.purpose(),
+        coin_type(network)
+    )
 }
 
-/// Strict BIP84 path check used by both signing paths.
-pub fn parse_bip84_path(path: &DerivationPath, network: Network) -> Option<(u32, u32)> {
+/// Strict account-path check shared by every signing path.
+///
+/// Only `m/84'|86'/coin'/0'/{0,1}/index` is accepted, the coin type must match the
+/// wallet's network, and the purpose selects the script type. Anything else is
+/// rejected rather than guessed at.
+pub fn parse_account_path(
+    path: &DerivationPath,
+    network: Network,
+) -> Result<(AddressType, u32, u32), String> {
     let parts: Vec<&ChildNumber> = path.into_iter().collect();
-    match parts.as_slice() {
-        [ChildNumber::Hardened { index: 84 }, ChildNumber::Hardened { index: coin }, ChildNumber::Hardened { index: 0 }, ChildNumber::Normal { index: chain }, ChildNumber::Normal { index }]
-            if *coin == coin_type(network) && *chain <= 1 =>
+    let (purpose, coin, chain, index) = match parts.as_slice() {
+        [ChildNumber::Hardened { index: purpose }, ChildNumber::Hardened { index: coin }, ChildNumber::Hardened { index: 0 }, ChildNumber::Normal { index: chain }, ChildNumber::Normal { index }]
+            if *chain <= 1 =>
         {
-            Some((*chain, *index))
+            (*purpose, *coin, *chain, *index)
         }
+        _ => return Err("unexpected derivation path".into()),
+    };
+    if coin != coin_type(network) {
+        return Err("derivation path is for a different network".into());
+    }
+    let kind = match purpose {
+        84 => AddressType::P2wpkh,
+        86 => AddressType::P2tr,
+        _ => return Err("unsupported derivation purpose".into()),
+    };
+    Ok((kind, chain, index))
+}
+
+/// BIP84-only variant, kept for the legacy P2WPKH paths and their tests.
+#[allow(dead_code)] // compatibility/test entry point
+pub fn parse_bip84_path(path: &DerivationPath, network: Network) -> Option<(u32, u32)> {
+    match parse_account_path(path, network) {
+        Ok((AddressType::P2wpkh, chain, index)) => Some((chain, index)),
         _ => None,
     }
 }
@@ -63,8 +96,9 @@ pub fn address_at(
 ) -> Result<String, String> {
     let secp = Secp256k1::new();
     let master = master(mnemonic, network)?;
-    let path = DerivationPath::from_str(&derivation_path(network, chain, index))
-        .map_err(|e| e.to_string())?;
+    let path =
+        DerivationPath::from_str(&derivation_path(network, AddressType::P2wpkh, chain, index))
+            .map_err(|e| e.to_string())?;
     let child = master
         .derive_priv(&secp, &path)
         .map_err(|e| e.to_string())?;
@@ -85,6 +119,7 @@ pub fn receive_address(
 pub struct Watch {
     xpub: Xpub,
     network: Network,
+    kind: AddressType,
 }
 
 impl Watch {
@@ -93,15 +128,37 @@ impl Watch {
         Self::from_mnemonic_with_passphrase(mnemonic, network, "")
     }
 
+    #[allow(dead_code)] // compatibility/test entry point
     pub fn from_mnemonic_with_passphrase(
         mnemonic: &Mnemonic,
         network: Network,
         passphrase: &str,
     ) -> Result<Self, String> {
+        Self::with_kind(mnemonic, network, passphrase, AddressType::P2wpkh)
+    }
+
+    /// Build from an authenticated wallet file. The address type comes from the
+    /// keystore header, never from the caller.
+    pub fn from_opened(opened: &keystore::Opened) -> Result<Self, String> {
+        Self::with_kind(
+            &opened.mnemonic,
+            opened.network,
+            &opened.passphrase,
+            opened.address_type,
+        )
+    }
+
+    pub fn with_kind(
+        mnemonic: &Mnemonic,
+        network: Network,
+        passphrase: &str,
+        kind: AddressType,
+    ) -> Result<Self, String> {
         let secp = Secp256k1::new();
         let mut master = master_with_passphrase(mnemonic, network, passphrase)?;
-        let path = DerivationPath::from_str(&format!("m/84'/{}'/0'", coin_type(network)))
-            .map_err(|e| e.to_string())?;
+        let path =
+            DerivationPath::from_str(&format!("m/{}'/{}'/0'", kind.purpose(), coin_type(network)))
+                .map_err(|e| e.to_string())?;
         let mut acct = match master.derive_priv(&secp, &path) {
             Ok(acct) => acct,
             Err(e) => {
@@ -113,11 +170,46 @@ impl Watch {
         // Only the public key is kept; erase the temporary private keys.
         acct.private_key.non_secure_erase();
         master.private_key.non_secure_erase();
-        Ok(Watch { xpub, network })
+        Ok(Watch {
+            xpub,
+            network,
+            kind,
+        })
     }
 
     pub fn network(&self) -> Network {
         self.network
+    }
+
+    pub fn kind(&self) -> AddressType {
+        self.kind
+    }
+
+    /// Address for a public key, in this wallet's script type.
+    fn address_for(&self, pk: PublicKey) -> String {
+        match self.kind {
+            AddressType::P2wpkh => {
+                Address::p2wpkh(&CompressedPublicKey(pk), self.network).to_string()
+            }
+            AddressType::P2tr => Address::p2tr(
+                &Secp256k1::new(),
+                XOnlyPublicKey::from(pk),
+                None,
+                self.network,
+            )
+            .to_string(),
+        }
+    }
+
+    /// Script for `chain/index`, in this wallet's script type.
+    pub fn script_at(&self, chain: u32, index: u32) -> Result<ScriptBuf, String> {
+        let pk = self.pubkey_at(chain, index)?;
+        Ok(match self.kind {
+            AddressType::P2wpkh => ScriptBuf::new_p2wpkh(&CompressedPublicKey(pk).wpubkey_hash()),
+            AddressType::P2tr => {
+                ScriptBuf::new_p2tr(&Secp256k1::new(), XOnlyPublicKey::from(pk), None)
+            }
+        })
     }
 
     pub fn xpub_string(&self) -> String {
@@ -130,9 +222,14 @@ impl Watch {
         if chain > 1 {
             return Err("chain must be 0 (receive) or 1 (change)".into());
         }
+        let fn_name = match self.kind {
+            AddressType::P2wpkh => "wpkh",
+            AddressType::P2tr => "tr",
+        };
         Ok(format!(
-            "wpkh([{}/84'/{}'/0']{}/{}/*)",
+            "{fn_name}([{}/{}'/{}'/0']{}/{}/*)",
             self.xpub.fingerprint(),
+            self.kind.purpose(),
             coin_type(self.network),
             self.xpub,
             chain
@@ -153,8 +250,7 @@ impl Watch {
                 let child = chain_key
                     .ckd_pub(&secp, ChildNumber::from_normal_idx(i).map_err(e)?)
                     .map_err(e)?;
-                let pk = CompressedPublicKey(child.public_key);
-                Ok(Address::p2wpkh(&pk, self.network).to_string())
+                Ok(self.address_for(child.public_key))
             })
             .collect()
     }
@@ -189,6 +285,7 @@ struct SignerInner {
     master: Xpriv,
     account: Xpriv,
     network: Network,
+    kind: AddressType,
 }
 
 pub struct Signer {
@@ -208,7 +305,17 @@ impl Signer {
     /// chain, or with a different passphrase, than the one the wallet was
     /// unlocked with.
     pub fn from_opened(opened: &keystore::Opened) -> Result<Self, String> {
-        Self::derive(&opened.mnemonic, opened.network, &opened.passphrase)
+        Self::derive(
+            &opened.mnemonic,
+            opened.network,
+            &opened.passphrase,
+            opened.address_type,
+        )
+    }
+
+    /// Address format this signer derives keys for.
+    pub fn kind(&self) -> AddressType {
+        self.inner.kind
     }
 
     /// Test-only: derive directly from a mnemonic. Kept out of the public API so
@@ -216,7 +323,7 @@ impl Signer {
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn from_mnemonic(mnemonic: &Mnemonic, network: Network) -> Result<Self, String> {
-        Self::derive(mnemonic, network, "")
+        Self::derive(mnemonic, network, "", AddressType::P2wpkh)
     }
 
     /// Test-only counterpart of [`Signer::from_opened`] for passphrase seeds.
@@ -227,14 +334,31 @@ impl Signer {
         network: Network,
         passphrase: &str,
     ) -> Result<Self, String> {
-        Self::derive(mnemonic, network, passphrase)
+        Self::derive(mnemonic, network, passphrase, AddressType::P2wpkh)
     }
 
-    fn derive(mnemonic: &Mnemonic, network: Network, passphrase: &str) -> Result<Self, String> {
+    /// Test-only: derive keys for an explicit address type (BIP84 or BIP86).
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn from_mnemonic_with_kind(
+        mnemonic: &Mnemonic,
+        network: Network,
+        kind: AddressType,
+    ) -> Result<Self, String> {
+        Self::derive(mnemonic, network, "", kind)
+    }
+
+    fn derive(
+        mnemonic: &Mnemonic,
+        network: Network,
+        passphrase: &str,
+        kind: AddressType,
+    ) -> Result<Self, String> {
         let secp = Secp256k1::new();
         let mut master = master_with_passphrase(mnemonic, network, passphrase)?;
-        let path = DerivationPath::from_str(&format!("m/84'/{}'/0'", coin_type(network)))
-            .map_err(|e| e.to_string())?;
+        let path =
+            DerivationPath::from_str(&format!("m/{}'/{}'/0'", kind.purpose(), coin_type(network)))
+                .map_err(|e| e.to_string())?;
         let account = match master.derive_priv(&secp, &path) {
             Ok(account) => account,
             Err(e) => {
@@ -246,6 +370,7 @@ impl Signer {
             master,
             account,
             network,
+            kind,
         });
         // Best effort: keep the key material out of swap. If the OS refuses
         // (for example a low RLIMIT_MEMLOCK), signing still proceeds.
@@ -295,10 +420,25 @@ impl Signer {
     pub fn sign_psbt(&self, psbt: &mut Psbt) -> Result<(), String> {
         let secp = Secp256k1::new();
         let tx = psbt.unsigned_tx.clone();
-        let mut cache = SighashCache::new(&tx);
         let master_fp = self.fingerprint();
-        let mut jobs = Vec::with_capacity(psbt.inputs.len());
 
+        // Taproot sighashes commit to every input's value and script, so all the
+        // witness UTXOs must be present before anything is signed.
+        let prevouts: Vec<TxOut> = psbt
+            .inputs
+            .iter()
+            .enumerate()
+            .map(|(i, input)| {
+                input
+                    .witness_utxo
+                    .clone()
+                    .ok_or_else(|| format!("input {i} has no witness UTXO"))
+            })
+            .collect::<Result<_, String>>()?;
+
+        // Pass 1: validate every input and record where its key lives. Nothing is
+        // signed until the whole PSBT has been checked.
+        let mut jobs: Vec<(usize, u32, u32)> = Vec::with_capacity(psbt.inputs.len());
         for (i, input) in psbt.inputs.iter().enumerate() {
             if !input.partial_sigs.is_empty()
                 || input.final_script_witness.is_some()
@@ -306,58 +446,109 @@ impl Signer {
             {
                 return Err(format!("input {i} is already signed"));
             }
-            if input.bip32_derivation.len() != 1 {
-                return Err(format!("input {i} must have exactly one BIP32 key origin"));
-            }
-            let (origin_pubkey, (fp, path)) = input.bip32_derivation.iter().next().unwrap();
-            if *fp != master_fp {
-                return Err(format!(
-                    "input {i} belongs to a different wallet (fingerprint mismatch)"
-                ));
-            }
-            let (chain, index) = parse_bip84_path(path, self.inner.network)
-                .ok_or_else(|| format!("input {i} has an unexpected derivation path"))?;
-            let utxo = input
-                .witness_utxo
-                .as_ref()
-                .ok_or_else(|| format!("input {i} has no witness UTXO"))?;
-            if !matches!(input.ecdsa_hash_ty(), Ok(EcdsaSighashType::All)) {
-                return Err(format!("input {i} does not use SIGHASH_ALL"));
-            }
-            let sighash = cache
-                .p2wpkh_signature_hash(i, &utxo.script_pubkey, utxo.value, EcdsaSighashType::All)
-                .map_err(|e| e.to_string())?;
-            let (mut sk, pk) = self.key_at(chain, index)?;
-            if pk != *origin_pubkey {
+            let utxo = &prevouts[i];
+            if utxo.script_pubkey.is_p2tr() {
+                let internal = input
+                    .tap_internal_key
+                    .ok_or_else(|| format!("input {i} has no taproot internal key"))?;
+                if input.tap_key_origins.len() != 1 {
+                    return Err(format!(
+                        "input {i} must have exactly one taproot key origin"
+                    ));
+                }
+                let (origin_xonly, (_, (fp, path))) = input.tap_key_origins.iter().next().unwrap();
+                if *fp != master_fp {
+                    return Err(format!(
+                        "input {i} belongs to a different wallet (fingerprint mismatch)"
+                    ));
+                }
+                let (_, chain, index) = parse_account_path(path, self.inner.network)
+                    .map_err(|e| format!("input {i}: {e}"))?;
+                let (mut sk, pk) = self.key_at(chain, index)?;
+                let xonly = XOnlyPublicKey::from(pk);
+                let expected = ScriptBuf::new_p2tr(&secp, xonly, None);
                 sk.non_secure_erase();
-                return Err(format!("input {i}: key does not match this wallet"));
-            }
-            let expected = ScriptBuf::new_p2wpkh(&CompressedPublicKey(pk).wpubkey_hash());
-            if expected != utxo.script_pubkey {
+                if xonly != *origin_xonly || xonly != internal {
+                    return Err(format!("input {i}: key does not match this wallet"));
+                }
+                if expected != utxo.script_pubkey {
+                    return Err(format!("input {i}: key does not match the coin's script"));
+                }
+                jobs.push((i, chain, index));
+            } else {
+                if input.bip32_derivation.len() != 1 {
+                    return Err(format!("input {i} must have exactly one BIP32 key origin"));
+                }
+                let (origin_pubkey, (fp, path)) = input.bip32_derivation.iter().next().unwrap();
+                if *fp != master_fp {
+                    return Err(format!(
+                        "input {i} belongs to a different wallet (fingerprint mismatch)"
+                    ));
+                }
+                let (_, chain, index) = parse_account_path(path, self.inner.network)
+                    .map_err(|e| format!("input {i}: {e}"))?;
+                if !matches!(input.ecdsa_hash_ty(), Ok(EcdsaSighashType::All)) {
+                    return Err(format!("input {i} does not use SIGHASH_ALL"));
+                }
+                let (mut sk, pk) = self.key_at(chain, index)?;
+                let expected = ScriptBuf::new_p2wpkh(&CompressedPublicKey(pk).wpubkey_hash());
                 sk.non_secure_erase();
-                return Err(format!("input {i}: key does not match the coin's script"));
+                if pk != *origin_pubkey {
+                    return Err(format!("input {i}: key does not match this wallet"));
+                }
+                if expected != utxo.script_pubkey {
+                    return Err(format!("input {i}: key does not match the coin's script"));
+                }
+                jobs.push((i, chain, index));
             }
             // Validation is complete. Do not keep every input's secret key in
             // memory at once; re-derive it for the signing pass below.
-            sk.non_secure_erase();
-            jobs.push((i, chain, index, pk, sighash));
         }
 
-        for (i, chain, index, pk, sighash) in jobs {
-            let (mut sk, derived_pk) = self.key_at(chain, index)?;
-            if derived_pk != pk {
+        // Pass 2: sign.
+        let mut cache = SighashCache::new(&tx);
+        for (i, chain, index) in jobs {
+            let (mut sk, _) = self.key_at(chain, index)?;
+            if prevouts[i].script_pubkey.is_p2tr() {
+                let sighash = cache
+                    .taproot_key_spend_signature_hash(
+                        i,
+                        &Prevouts::All(&prevouts),
+                        TapSighashType::Default,
+                    )
+                    .map_err(|e| e.to_string())?;
+                let keypair = Keypair::from_secret_key(&secp, &sk);
                 sk.non_secure_erase();
-                return Err(format!("input {i}: key derivation changed unexpectedly"));
+                // Deterministic nonces: no extra randomness is needed or used.
+                let sig = secp.sign_schnorr_no_aux_rand(
+                    &Message::from_digest(sighash.to_byte_array()),
+                    &keypair,
+                );
+                let mut witness = Witness::new();
+                witness.push(sig.as_ref());
+                let input = &mut psbt.inputs[i];
+                input.final_script_witness = Some(witness);
+                input.partial_sigs.clear();
+            } else {
+                let sighash = cache
+                    .p2wpkh_signature_hash(
+                        i,
+                        &prevouts[i].script_pubkey,
+                        prevouts[i].value,
+                        EcdsaSighashType::All,
+                    )
+                    .map_err(|e| e.to_string())?;
+                let sig = secp.sign_ecdsa(&Message::from(sighash), &sk);
+                let pk = self.key_at(chain, index)?.1;
+                sk.non_secure_erase();
+                let signature = bitcoin::ecdsa::Signature {
+                    signature: sig,
+                    sighash_type: EcdsaSighashType::All,
+                };
+                let input = &mut psbt.inputs[i];
+                input.final_script_witness = Some(Witness::p2wpkh(&signature, &pk));
+                input.partial_sigs.clear();
             }
-            let sig = secp.sign_ecdsa(&Message::from(sighash), &sk);
-            sk.non_secure_erase();
-            let signature = bitcoin::ecdsa::Signature {
-                signature: sig,
-                sighash_type: EcdsaSighashType::All,
-            };
-            let input = &mut psbt.inputs[i];
-            input.final_script_witness = Some(Witness::p2wpkh(&signature, &pk));
-            input.partial_sigs.clear();
         }
         Ok(())
     }
@@ -398,6 +589,52 @@ mod tests {
             receive_address(&m, Network::Bitcoin, 0).unwrap(),
             "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
         );
+    }
+
+    #[test]
+    fn bip86_official_vector_first_address() {
+        // From the BIP86 spec: mainnet m/86'/0'/0'/0/0 for the "abandon ... about" seed.
+        let m = Mnemonic::parse(ABANDON).unwrap();
+        let w = Watch::with_kind(&m, Network::Bitcoin, "", AddressType::P2tr).unwrap();
+        assert_eq!(
+            w.address_at(0, 0).unwrap(),
+            "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr"
+        );
+        let d = w.descriptor(0).unwrap();
+        assert!(d.starts_with("tr(["));
+        assert!(d.contains("/86'/0'/0']"));
+        assert!(d.ends_with("/0/*)"));
+
+        // The BIP84 wallet for the same seed is a different wallet entirely.
+        let legacy = Watch::from_mnemonic(&m, Network::Bitcoin).unwrap();
+        assert_ne!(
+            legacy.address_at(0, 0).unwrap(),
+            w.address_at(0, 0).unwrap()
+        );
+
+        let t = Watch::with_kind(&m, Network::Testnet, "", AddressType::P2tr).unwrap();
+        assert!(t.address_at(0, 0).unwrap().starts_with("tb1p"));
+        assert_eq!(t.kind(), AddressType::P2tr);
+    }
+
+    #[test]
+    fn account_paths_select_the_script_type() {
+        let legacy: DerivationPath = "m/84'/0'/0'/0/3".parse().unwrap();
+        let taproot: DerivationPath = "m/86'/0'/0'/1/4".parse().unwrap();
+        assert_eq!(
+            parse_account_path(&legacy, Network::Bitcoin),
+            Ok((AddressType::P2wpkh, 0, 3))
+        );
+        assert_eq!(
+            parse_account_path(&taproot, Network::Bitcoin),
+            Ok((AddressType::P2tr, 1, 4))
+        );
+        // Wrong network, wrong purpose, or a stray hardened index is refused.
+        assert!(parse_account_path(&taproot, Network::Testnet).is_err());
+        let wrong: DerivationPath = "m/44'/0'/0'/0/0".parse().unwrap();
+        assert!(parse_account_path(&wrong, Network::Bitcoin).is_err());
+        let hardened: DerivationPath = "m/86'/0'/0'/0'/0".parse().unwrap();
+        assert!(parse_account_path(&hardened, Network::Bitcoin).is_err());
     }
 
     #[test]
@@ -475,6 +712,7 @@ mod tests {
             passphrase: Zeroizing::new("correct horse".to_string()),
             fingerprint: "73c5da0a".into(),
             network: Network::Testnet,
+            address_type: AddressType::P2wpkh,
         };
         let signer = Signer::from_opened(&opened).unwrap();
         let expected =

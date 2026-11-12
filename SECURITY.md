@@ -89,6 +89,12 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
   than 1,000,000 sats absolute, and a 1,000 sat/vB rate ceiling rejects hidden-fee estimates. Explicit
   `SEND` confirmation and deterministic signatures. Server-provided txids are validated before
   display.
+- **Address type is authenticated:** whether a wallet derives BIP84 (`bc1q…`) or BIP86 (`bc1p…`)
+  addresses is bound into the v4 wallet header's AAD. Editing the field makes decryption fail, so a
+  tampered file cannot make the wallet show addresses derived from another purpose.
+- **Taproot spends are key-path only:** the signer accepts exactly one taproot key origin, requires
+  the internal key to match, refuses any taproot input carrying script-path leaves, and checks the
+  derived key against the coin's `tr()` script before signing with a deterministic nonce.
 - **Fee bumping (RBF):** a replacement is built only from the original transaction's own inputs
   and payment output. Every input must belong to the wallet, the recipient is re-derived and shown
   again, the extra fee comes out of change (never the recipient's amount), change must stay above
