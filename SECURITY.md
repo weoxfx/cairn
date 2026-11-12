@@ -95,6 +95,11 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
 - **Taproot spends are key-path only:** the signer accepts exactly one taproot key origin, requires
   the internal key to match, refuses any taproot input carrying script-path leaves, and checks the
   derived key against the coin's `tr()` script before signing with a deterministic nonce.
+- **Multisig vaults:** vault files hold public keys only. Signing checks the PSBT's witness script
+  against the vault's own script for every listed derivation path, rejects key origins that are not
+  cosigners, and compares the derived key with the one the script names. Finalizing re-parses the
+  witness script, confirms the UTXO pays it, requires the threshold of signatures and verifies each
+  one against the BIP143 sighash, so a tampered or foreign PSBT cannot be completed.
 - **Fee bumping (RBF):** a replacement is built only from the original transaction's own inputs
   and payment output. Every input must belong to the wallet, the recipient is re-derived and shown
   again, the extra fee comes out of change (never the recipient's amount), change must stay above

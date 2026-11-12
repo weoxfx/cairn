@@ -411,6 +411,25 @@ impl Signer {
         Ok((sk, pk))
     }
 
+    /// Derive a key at an absolute path from the wallet master key.
+    ///
+    /// Used by multisig vaults, whose cosigner keys live at
+    /// `m/48'/coin'/0'/2'/chain/index` rather than under the single-sig account.
+    pub fn key_at_absolute(&self, path: &DerivationPath) -> Result<(SecretKey, PublicKey), String> {
+        let secp = Secp256k1::new();
+        let mut child = self
+            .inner
+            .master
+            .derive_priv(&secp, path)
+            .map_err(|e| e.to_string())?;
+        let mut kp = child.to_keypair(&secp);
+        let sk = kp.secret_key();
+        let pk = kp.public_key();
+        kp.non_secure_erase();
+        child.private_key.non_secure_erase();
+        Ok((sk, pk))
+    }
+
     /// Sign every P2WPKH input of `psbt` and finalize it for broadcasting.
     ///
     /// This deliberately does not use `Psbt::sign` followed by "pick the first

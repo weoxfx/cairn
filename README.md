@@ -230,6 +230,31 @@ failing. Spending a Taproot coin is a single-schnorr-signature key-path spend (B
 `SIGHASH_DEFAULT`); the send, fee-bump and offline PSBT flows all handle both script types, and
 fee estimates are per input/output type rather than a single average.
 
+## Multisig vaults (2-of-3)
+
+`cairn multisig` builds n-of-m P2WSH vaults whose cosigner keys are spread across machines or
+hardware wallets. Creating a vault stores only public data (the cosigner xpubs and their origins)
+at `~/.cairn/multisig/<name>.json`, and prints a `wsh(sortedmulti(…))` descriptor you can import
+elsewhere. Keys are sorted (BIP67), so the address does not depend on the order the xpubs were
+entered in.
+
+Spending is a file hand-off, so no machine ever needs more than one key:
+
+```bash
+cairn multisig create --name savings --threshold 2 --cosigner "phone:tpub…" --cosigner "safe:tpub…"
+cairn multisig psbt   --name savings --to bc1q… --amount 0.01 --rate 2
+cairn multisig sign   --name savings --psbt savings-unsigned.psbt   # on cosigner A
+cairn multisig sign   --name savings --psbt savings-unsigned.psbt   # on cosigner B
+cairn multisig combine a-signed.psbt b-signed.psbt --out signed.psbt
+cairn multisig finalize --psbt signed.psbt --broadcast
+```
+
+Each signer refuses a PSBT whose witness script is not the vault's script for the path it lists,
+whose key origins are not cosigners of that vault, or whose key does not lock the coin. `finalize`
+re-parses the witness script, checks that the UTXO really pays it, requires the threshold of
+signatures and verifies every one of them before building the witness. Change is sent to the
+vault's change chain, at the index given by `--change-index` (default 0).
+
 ## Bumping a pending payment
 
 If a send is stuck because fees rose, the dashboard's **Bump fee** entry replaces it (RBF) instead

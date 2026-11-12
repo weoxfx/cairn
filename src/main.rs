@@ -5,6 +5,7 @@ mod evm_cli;
 mod hardening;
 mod keystore;
 mod labels;
+mod multisig;
 mod network;
 mod offline;
 mod passphrase;
@@ -87,6 +88,7 @@ fn run() -> Result<(), String> {
         }
         "--security-check" => security_check(&args[1..], json),
         "evm" => evm_cli::run(&args[1..], json),
+        "multisig" => multisig::run(&args[1..], json),
         "--create-psbt" => {
             let (pos, out) = parse_args(&args[1..])?;
             if pos.len() > 1 {
@@ -296,6 +298,10 @@ Usage:
   cairn --security-check [WALLET] [--json]   Same as `security check`
   cairn evm <command>                        EVM accounts, tokens and transfers
                                              (see `cairn evm help`)
+  cairn multisig <command>                   n-of-m P2WSH vaults, coordinated
+                                             with PSBT files (create, list,
+                                             info, address, balance, psbt,
+                                             sign, combine, finalize)
   cairn --version [--json]                   Show the version
   cairn --help                               Show this help
 
