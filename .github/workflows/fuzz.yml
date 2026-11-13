@@ -5,9 +5,22 @@ on:
     # Weekly, off the main CI path so fuzzing never delays a fix.
     - cron: "17 3 * * 1"
   workflow_dispatch:
+  pull_request:
+    # Parsers get a short smoke run on every change to them.
+    paths:
+      - "src/**"
+      - "fuzz/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/fuzz.yml"
 
 permissions:
   contents: read
+
+env:
+  # Pinned: a new nightly is a deliberate change, never a silent one. The fuzz
+  # targets need nightly for the sanitizer coverage build.
+  NIGHTLY: nightly-2026-11-01
 
 jobs:
   fuzz:
@@ -15,11 +28,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [url_guard, qr_frames, psbt, keystore]
+        target: [url_guard, qr_frames, psbt, keystore, electrum_reply, evm_rlp]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: dtolnay/rust-toolchain@2c76c034f9e32a5d6e2c104dc4df23a22476db04
         with:
-          toolchain: nightly
+          toolchain: ${{ env.NIGHTLY }}
+      # The corpus is what makes a 30-second PR run worth anything: crashes found
+      # earlier keep being replayed even when a run is cut short.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.sha }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
       - run: cargo install cargo-fuzz --locked
-      - run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=120
+      - name: Fuzz
+        env:
+          FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && 30 || 180 }}
+        run: cargo +${{ env.NIGHTLY }} fuzz run ${{ matrix.target }} -- -max_total_time=$FUZZ_SECONDS

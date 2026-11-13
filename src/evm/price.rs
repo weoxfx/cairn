@@ -8,7 +8,6 @@
 
 use crate::evm::chains::Chain;
 use std::collections::HashMap;
-use std::io::Read;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -117,27 +116,17 @@ fn token_url(platform: &str, contract: &str) -> String {
 }
 
 fn get_json(url: &str) -> Option<serde_json::Value> {
-    let mut builder = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(6))
-        .timeout_connect(Duration::from_secs(4))
-        .https_only(true)
-        .redirects(0)
-        .max_idle_connections(0);
-    if let Some(p) = std::env::var("CAIRN_PROXY")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-    {
-        builder = builder.proxy(ureq::Proxy::new(&p).ok()?);
-    }
-    let resp = builder.build().get(url).call().ok()?;
-    let mut body = String::new();
-    resp.into_reader()
-        .take(MAX_BODY + 1)
-        .read_to_string(&mut body)
-        .ok()?;
-    if body.len() as u64 > MAX_BODY {
-        return None;
-    }
+    // A configured but unparseable proxy makes this fail closed: no price is
+    // better than a request that leaks the user's address around the proxy.
+    let agent = crate::http::agent(
+        "evm price",
+        Duration::from_secs(4),
+        Duration::from_secs(6),
+        Duration::from_secs(6),
+    )
+    .ok()?;
+    let resp = agent.get(url).call().ok()?;
+    let body = crate::http::read_body(resp, MAX_BODY, "price response").ok()?;
     serde_json::from_str(&body).ok()
 }
 
@@ -166,6 +155,19 @@ mod tests {
         assert!(token_url("polygon-pos", "0xabcd")
             .starts_with("https://example.test/simple/token_price/polygon-pos?"));
         std::env::remove_var("CAIRN_PRICE_API");
+    }
+
+    /// The price lookup used to ignore `CAIRN_TOR` and drop an unparseable
+    /// `CAIRN_PROXY`, sending the request out direct. It must now fail closed:
+    /// no price is better than one that leaks the user's address around the proxy.
+    #[test]
+    fn an_unusable_proxy_disables_pricing_instead_of_going_direct() {
+        std::env::remove_var("CAIRN_NO_PRICE");
+        std::env::remove_var("CAIRN_TOR");
+        std::env::set_var("CAIRN_PROXY", "socks5h://127.0.0.1:9050");
+        let url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd";
+        assert!(get_json(url).is_none());
+        std::env::remove_var("CAIRN_PROXY");
     }
 
     #[test]

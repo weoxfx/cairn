@@ -17,6 +17,8 @@
 //! xpubs were entered in. Every signature is checked against the BIP143 sighash
 //! before it is produced, and again before a transaction is finalized.
 
+use crate::error::Result;
+
 use crate::chain;
 use crate::esplora::{self, Utxo};
 use crate::hardening;
@@ -62,15 +64,19 @@ pub struct Cosigner {
 }
 
 impl Cosigner {
-    fn xpub(&self) -> Result<Xpub, String> {
-        Xpub::from_str(&self.xpub).map_err(|e| format!("invalid cosigner xpub: {e}"))
+    fn xpub(&self) -> Result<Xpub> {
+        Xpub::from_str(&self.xpub)
+            .map_err(|e| format!("invalid cosigner xpub: {e}"))
+            .map_err(crate::error::Error::from)
     }
 
-    fn origin(&self) -> Result<DerivationPath, String> {
-        DerivationPath::from_str(&self.path).map_err(|e| format!("invalid cosigner path: {e}"))
+    fn origin(&self) -> Result<DerivationPath> {
+        DerivationPath::from_str(&self.path)
+            .map_err(|e| format!("invalid cosigner path: {e}"))
+            .map_err(crate::error::Error::from)
     }
 
-    fn fingerprint(&self) -> Result<Fingerprint, String> {
+    fn fingerprint(&self) -> Result<Fingerprint> {
         Fingerprint::from_str(&self.fingerprint).map_err(|_| "invalid cosigner fingerprint".into())
     }
 }
@@ -93,7 +99,7 @@ fn network_id(network: Network) -> &'static str {
     }
 }
 
-fn parse_network(s: &str) -> Result<Network, String> {
+fn parse_network(s: &str) -> Result<Network> {
     match s {
         "mainnet" => Ok(Network::Bitcoin),
         "testnet" => Ok(Network::Testnet),
@@ -116,17 +122,17 @@ impl Vault {
         }
     }
 
-    pub fn network(&self) -> Result<Network, String> {
+    pub fn network(&self) -> Result<Network> {
         parse_network(&self.network)
     }
 
-    fn check(&self) -> Result<(), String> {
+    fn check(&self) -> Result<()> {
         let m = self.cosigners.len() as u32;
         if !(2..=MAX_COSIGNERS).contains(&m) {
-            return Err(format!("a vault needs 2 to {MAX_COSIGNERS} cosigners"));
+            return Err(format!("a vault needs 2 to {MAX_COSIGNERS} cosigners").into());
         }
         if self.threshold < 1 || self.threshold > m {
-            return Err(format!("threshold must be between 1 and {m}"));
+            return Err(format!("threshold must be between 1 and {m}").into());
         }
         for c in &self.cosigners {
             let _ = c.xpub()?;
@@ -138,7 +144,7 @@ impl Vault {
     }
 
     /// Sorted cosigner keys for one address (BIP67).
-    pub fn pubkeys_at(&self, chain: u32, index: u32) -> Result<Vec<PublicKey>, String> {
+    pub fn pubkeys_at(&self, chain: u32, index: u32) -> Result<Vec<PublicKey>> {
         self.check()?;
         let secp = Secp256k1::new();
         let step = [
@@ -157,12 +163,12 @@ impl Vault {
         Ok(keys)
     }
 
-    pub fn witness_script(&self, chain: u32, index: u32) -> Result<ScriptBuf, String> {
+    pub fn witness_script(&self, chain: u32, index: u32) -> Result<ScriptBuf> {
         let keys = self.pubkeys_at(chain, index)?;
         Ok(multisig_script(self.threshold, &keys))
     }
 
-    pub fn address(&self, chain: u32, index: u32) -> Result<Address, String> {
+    pub fn address(&self, chain: u32, index: u32) -> Result<Address> {
         Ok(Address::p2wsh(
             &self.witness_script(chain, index)?,
             self.network()?,
@@ -170,7 +176,7 @@ impl Vault {
     }
 
     /// Wallet-importable descriptor for the whole vault.
-    pub fn descriptor(&self) -> Result<String, String> {
+    pub fn descriptor(&self) -> Result<String> {
         self.check()?;
         let parts: Vec<String> = self
             .cosigners
@@ -189,7 +195,7 @@ impl Vault {
 
     /// Stable short identifier derived from the descriptor, so two machines can
     /// confirm they are looking at the same vault.
-    pub fn id(&self) -> Result<String, String> {
+    pub fn id(&self) -> Result<String> {
         let d = self.descriptor()?;
         Ok(bitcoin::hashes::sha256::Hash::hash(d.as_bytes()).to_string()[..16].to_string())
     }
@@ -212,11 +218,11 @@ pub fn multisig_script(threshold: u32, keys: &[PublicKey]) -> ScriptBuf {
 
 /// Read back a multisig witness script. Refuses anything that is not exactly
 /// `OP_m <key…> OP_n OP_CHECKMULTISIG` with a coherent key count.
-pub fn parse_multisig(script: &bitcoin::Script) -> Result<(u32, Vec<PublicKey>), String> {
+pub fn parse_multisig(script: &bitcoin::Script) -> Result<(u32, Vec<PublicKey>)> {
     let items: Vec<Instruction> = script
         .instructions()
         .map(|i| i.map_err(|e| format!("malformed witness script: {e}")))
-        .collect::<Result<_, String>>()?;
+        .collect::<std::result::Result<_, String>>()?;
     if items.last() != Some(&Instruction::Op(OP_CHECKMULTISIG)) {
         return Err("witness script does not end with OP_CHECKMULTISIG".into());
     }
@@ -255,7 +261,7 @@ pub fn parse_multisig(script: &bitcoin::Script) -> Result<(u32, Vec<PublicKey>),
 
 // ---------------- vault files ----------------
 
-fn dir() -> Result<PathBuf, String> {
+fn dir() -> Result<PathBuf> {
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
     let base = PathBuf::from(home).join(".cairn").join("multisig");
     hardening::ensure_private_dir(&base)?;
@@ -270,14 +276,14 @@ fn valid_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-fn vault_path(name: &str) -> Result<PathBuf, String> {
+fn vault_path(name: &str) -> Result<PathBuf> {
     if !valid_name(name) {
         return Err("vault names may use letters, digits, - and _ only".into());
     }
     Ok(dir()?.join(format!("{name}.json")))
 }
 
-pub fn load(name: &str) -> Result<Vault, String> {
+pub fn load(name: &str) -> Result<Vault> {
     let path = vault_path(name)?;
     let data = std::fs::read_to_string(&path)
         .map_err(|_| format!("no vault named '{name}' (try `cairn multisig list`)"))?;
@@ -286,21 +292,22 @@ pub fn load(name: &str) -> Result<Vault, String> {
     Ok(vault)
 }
 
-fn save(vault: &Vault) -> Result<PathBuf, String> {
+fn save(vault: &Vault) -> Result<PathBuf> {
     vault.check()?;
     let path = vault_path(&vault.name)?;
     if path.exists() {
         return Err(format!(
             "a vault named '{}' already exists; refusing to overwrite it",
             vault.name
-        ));
+        )
+        .into());
     }
     let json = serde_json::to_vec_pretty(vault).map_err(|e| e.to_string())?;
     hardening::write_private(&path, &json)?;
     Ok(path)
 }
 
-fn list_vaults() -> Result<Vec<Vault>, String> {
+fn list_vaults() -> Result<Vec<Vault>> {
     let mut out = vec![];
     for entry in std::fs::read_dir(dir()?).map_err(|e| e.to_string())? {
         let p = entry.map_err(|e| e.to_string())?.path();
@@ -319,7 +326,7 @@ fn list_vaults() -> Result<Vec<Vault>, String> {
 
 // ---------------- keys ----------------
 
-fn cosigner_from_seed(seed: &[u8], network: Network, label: &str) -> Result<Cosigner, String> {
+fn cosigner_from_seed(seed: &[u8], network: Network, label: &str) -> Result<Cosigner> {
     let secp = Secp256k1::new();
     let mut master = Xpriv::new_master(network, seed).map_err(|e| format!("invalid seed: {e}"))?;
     let path = DerivationPath::from_str(&format!("m/48'/{}'/0'/2'", wallet::coin_type(network)))
@@ -342,7 +349,7 @@ fn cosigner_from_seed(seed: &[u8], network: Network, label: &str) -> Result<Cosi
 }
 
 /// This device's cosigner key, derived from the authenticated wallet seed.
-fn device_cosigner(opened: &keystore::Opened, label: &str) -> Result<Cosigner, String> {
+fn device_cosigner(opened: &keystore::Opened, label: &str) -> Result<Cosigner> {
     let seed = Zeroizing::new(opened.mnemonic.to_seed(opened.passphrase.as_str()));
     cosigner_from_seed(seed.as_ref(), opened.network, label)
 }
@@ -353,7 +360,7 @@ fn device_cosigner(opened: &keystore::Opened, label: &str) -> Result<Cosigner, S
 /// witness script must be the vault's script for the path in the PSBT, every
 /// listed origin must be one of the vault's cosigners, and the key must really
 /// be the one the witness script names.
-pub fn sign_psbt(vault: &Vault, signer: &Signer, psbt: &mut Psbt) -> Result<u32, String> {
+pub fn sign_psbt(vault: &Vault, signer: &Signer, psbt: &mut Psbt) -> Result<u32> {
     vault.check()?;
     let network = vault.network()?;
     if signer.network() != network {
@@ -364,7 +371,8 @@ pub fn sign_psbt(vault: &Vault, signer: &Signer, psbt: &mut Psbt) -> Result<u32,
         return Err(format!(
             "this wallet ({master_fp}) is not a cosigner of vault '{}'",
             vault.name
-        ));
+        )
+        .into());
     }
     let origin = vault
         .cosigners
@@ -390,15 +398,11 @@ pub fn sign_psbt(vault: &Vault, signer: &Signer, psbt: &mut Psbt) -> Result<u32,
         if !utxo.script_pubkey.is_p2wsh()
             || Address::p2wsh(&script, network).script_pubkey() != utxo.script_pubkey
         {
-            return Err(format!(
-                "input {i}: witness UTXO does not pay this witness script"
-            ));
+            return Err(format!("input {i}: witness UTXO does not pay this witness script").into());
         }
         let (threshold, keys) = parse_multisig(&script)?;
         if threshold != vault.threshold || keys.len() != vault.cosigners.len() {
-            return Err(format!(
-                "input {i}: witness script does not match this vault"
-            ));
+            return Err(format!("input {i}: witness script does not match this vault").into());
         }
         // Every listed origin must belong to a vault cosigner, and the script
         // must be the one that vault produces at that path.
@@ -407,32 +411,27 @@ pub fn sign_psbt(vault: &Vault, signer: &Signer, psbt: &mut Psbt) -> Result<u32,
             if !vault.has_fingerprint(&fp.to_string()) {
                 return Err(format!(
                     "input {i} lists a key origin that is not a cosigner of this vault"
-                ));
+                )
+                .into());
             }
             if !keys.iter().any(|k| k.inner == *pubkey) {
-                return Err(format!(
-                    "input {i}: a listed key is not in the witness script"
-                ));
+                return Err(format!("input {i}: a listed key is not in the witness script").into());
             }
             let parts: Vec<ChildNumber> = path.as_ref().to_vec();
             if parts.len() != origin_parts.len() + 2 || parts[..origin_parts.len()] != origin_parts
             {
-                return Err(format!(
-                    "input {i}: a listed path is not a vault address path"
-                ));
+                return Err(format!("input {i}: a listed path is not a vault address path").into());
             }
             let chain = match parts[origin_parts.len()] {
                 ChildNumber::Normal { index } => index,
-                _ => return Err(format!("input {i} has an invalid chain")),
+                _ => return Err(format!("input {i} has an invalid chain").into()),
             };
             let index = match parts[origin_parts.len() + 1] {
                 ChildNumber::Normal { index } => index,
-                _ => return Err(format!("input {i} has an invalid address index")),
+                _ => return Err(format!("input {i} has an invalid address index").into()),
             };
             if vault.witness_script(chain, index)? != script {
-                return Err(format!(
-                    "input {i}: witness script is not for this derivation"
-                ));
+                return Err(format!("input {i}: witness script is not for this derivation").into());
             }
             if fp.to_string() == master_fp {
                 ours = Some((*pubkey, path));
@@ -444,7 +443,7 @@ pub fn sign_psbt(vault: &Vault, signer: &Signer, psbt: &mut Psbt) -> Result<u32,
         let (mut sk, pk) = signer.key_at_absolute(path)?;
         sk.non_secure_erase();
         if pk != pubkey {
-            return Err(format!("input {i}: key does not match this wallet"));
+            return Err(format!("input {i}: key does not match this wallet").into());
         }
         jobs.push((i, path.clone(), PublicKey::new(pubkey), script, utxo.value));
     }
@@ -464,7 +463,7 @@ pub fn sign_psbt(vault: &Vault, signer: &Signer, psbt: &mut Psbt) -> Result<u32,
         };
         if let Some(existing) = psbt.inputs[i].partial_sigs.get(&pubkey) {
             if *existing != signature {
-                return Err(format!("input {i} already carries a different signature"));
+                return Err(format!("input {i} already carries a different signature").into());
             }
         }
         psbt.inputs[i].partial_sigs.insert(pubkey, signature);
@@ -518,12 +517,13 @@ pub fn plan_spend(
     amount: Option<u64>,
     rate: f64,
     change_index: u32,
-) -> Result<Spend, String> {
+) -> Result<Spend> {
     if !(1.0..=network::MAX_FEE_RATE).contains(&rate) {
         return Err(format!(
             "fee rate must be between 1 and {:.0} sat/vB",
             network::MAX_FEE_RATE
-        ));
+        )
+        .into());
     }
     let script_len = vault.witness_script(0, 0)?.len();
     let to_spk = to.script_pubkey();
@@ -565,7 +565,7 @@ pub fn plan_spend(
         Some(amt) => {
             let dust = send::dust_limit(&to_spk);
             if amt < dust {
-                return Err(format!("Amount is below the dust limit ({dust} sats)"));
+                return Err(format!("Amount is below the dust limit ({dust} sats)").into());
             }
             let mut sel: Vec<Coin> = vec![];
             let mut sum = 0u64;
@@ -607,7 +607,7 @@ pub fn plan_spend(
 
 /// Unsigned PSBT with the witness script, the value, and a key origin for every
 /// cosigner, so each of them can sign the same file.
-pub fn build_psbt(vault: &Vault, spend: &Spend) -> Result<Psbt, String> {
+pub fn build_psbt(vault: &Vault, spend: &Spend) -> Result<Psbt> {
     vault.check()?;
     let mut tx = Transaction {
         version: Version::TWO,
@@ -691,7 +691,7 @@ pub fn build_psbt(vault: &Vault, spend: &Spend) -> Result<Psbt, String> {
 /// This works on the PSBT alone: it re-parses each witness script, checks the
 /// UTXO really pays it, requires the threshold to be met, and verifies every
 /// signature it is about to use against the BIP143 sighash.
-pub fn finalize(psbt: &mut Psbt) -> Result<Transaction, String> {
+pub fn finalize(psbt: &mut Psbt) -> Result<Transaction> {
     let tx = psbt.unsigned_tx.clone();
     let secp = Secp256k1::new();
     let mut cache = SighashCache::new(&tx);
@@ -709,9 +709,7 @@ pub fn finalize(psbt: &mut Psbt) -> Result<Transaction, String> {
         if !utxo.script_pubkey.is_p2wsh()
             || utxo.script_pubkey != Address::p2wsh(&script, Network::Bitcoin).script_pubkey()
         {
-            return Err(format!(
-                "input {i}: witness UTXO does not pay this witness script"
-            ));
+            return Err(format!("input {i}: witness UTXO does not pay this witness script").into());
         }
         let (threshold, keys) = parse_multisig(&script)?;
         let available = input
@@ -720,9 +718,9 @@ pub fn finalize(psbt: &mut Psbt) -> Result<Transaction, String> {
             .filter(|k| keys.iter().any(|x| x == *k))
             .count();
         if available < threshold as usize {
-            return Err(format!(
-                "input {i} has {available} of {threshold} required signatures"
-            ));
+            return Err(
+                format!("input {i} has {available} of {threshold} required signatures").into(),
+            );
         }
         let sighash = cache
             .p2wsh_signature_hash(i, &script, utxo.value, EcdsaSighashType::All)
@@ -749,12 +747,15 @@ pub fn finalize(psbt: &mut Psbt) -> Result<Transaction, String> {
         psbt.inputs[i].final_script_witness = Some(witness);
         psbt.inputs[i].partial_sigs.clear();
     }
-    psbt.clone().extract_tx().map_err(|e| e.to_string())
+    psbt.clone()
+        .extract_tx()
+        .map_err(|e| e.to_string())
+        .map_err(crate::error::Error::from)
 }
 
 // ---------------- reading and writing ----------------
 
-fn read_psbt(path: &str) -> Result<Psbt, String> {
+fn read_psbt(path: &str) -> Result<Psbt> {
     let p = PathBuf::from(path);
     let meta = std::fs::symlink_metadata(&p).map_err(|e| format!("cannot read PSBT: {e}"))?;
     if meta.file_type().is_symlink() || !meta.is_file() {
@@ -764,14 +765,16 @@ fn read_psbt(path: &str) -> Result<Psbt, String> {
         return Err("PSBT file is unexpectedly large".into());
     }
     let bytes = std::fs::read(&p).map_err(|e| format!("cannot read PSBT: {e}"))?;
-    Psbt::deserialize(&bytes).map_err(|e| format!("not a valid PSBT: {e}"))
+    Psbt::deserialize(&bytes)
+        .map_err(|e| format!("not a valid PSBT: {e}"))
+        .map_err(crate::error::Error::from)
 }
 
-fn write_psbt(path: &str, psbt: &Psbt) -> Result<(), String> {
+fn write_psbt(path: &str, psbt: &Psbt) -> Result<()> {
     hardening::write_private(&PathBuf::from(path), &psbt.serialize())
 }
 
-fn confirm(prompt: &str, word: &str) -> Result<bool, String> {
+fn confirm(prompt: &str, word: &str) -> Result<bool> {
     let answer: String = dialoguer::Input::with_theme(&crate::ui::theme())
         .with_prompt(prompt)
         .allow_empty(true)
@@ -806,12 +809,14 @@ impl Opts {
     fn has(&self, k: &str) -> bool {
         self.val.iter().any(|(key, _)| key == k)
     }
-    fn need(&self, k: &str) -> Result<&str, String> {
-        self.get(k).ok_or_else(|| format!("--{k} is required"))
+    fn need(&self, k: &str) -> Result<&str> {
+        self.get(k)
+            .ok_or_else(|| format!("--{k} is required"))
+            .map_err(crate::error::Error::from)
     }
 }
 
-fn parse(argv: &[String]) -> Result<Opts, String> {
+fn parse(argv: &[String]) -> Result<Opts> {
     let mut pos = vec![];
     let mut val = vec![];
     let mut it = argv.iter();
@@ -822,7 +827,7 @@ fn parse(argv: &[String]) -> Result<Opts, String> {
             } else {
                 let v = it.next().ok_or_else(|| format!("--{k} needs a value"))?;
                 if v.starts_with("--") {
-                    return Err(format!("--{k} needs a value"));
+                    return Err(format!("--{k} needs a value").into());
                 }
                 val.push((k.to_string(), v.clone()));
             }
@@ -833,7 +838,7 @@ fn parse(argv: &[String]) -> Result<Opts, String> {
     Ok(Opts { pos, val })
 }
 
-pub fn run(argv: &[String], json: bool) -> Result<(), String> {
+pub fn run(argv: &[String], json: bool) -> Result<()> {
     let o = parse(argv)?;
     let json = json || o.has("json");
     match o.pos.first().map(|s| s.as_str()) {
@@ -848,16 +853,16 @@ pub fn run(argv: &[String], json: bool) -> Result<(), String> {
         Some("finalize") => finalize_cmd(&o),
         Some(other) => Err(format!(
             "unknown multisig command '{other}' (try: create, list, info, address, balance, psbt, sign, combine, finalize)"
-        )),
-        None => Err("usage: cairn multisig <create|list|info|address|balance|psbt|sign|combine|finalize>".into()),
+        ).into()),
+        None => Err(crate::error::Error::input("usage: cairn multisig <create|list|info|address|balance|psbt|sign|combine|finalize>")),
     }
 }
 
 /// Interactive vault screen, reached from the single `cairn` shell.
-pub fn screen() -> Result<(), String> {
+pub fn screen() -> Result<()> {
     loop {
         if let Err(e) = list(false) {
-            warn(&e);
+            warn(e.message());
         }
         hint("A vault spends by handing PSBT files between cosigners.");
         println!();
@@ -912,7 +917,7 @@ pub fn screen() -> Result<(), String> {
                 };
                 if let Err(e) = run(&[cmd.to_string(), "--name".into(), name], false) {
                     println!();
-                    fail(&e);
+                    fail(e.message());
                 }
                 println!();
                 pause();
@@ -921,7 +926,7 @@ pub fn screen() -> Result<(), String> {
     }
 }
 
-fn create(o: &Opts, json: bool) -> Result<(), String> {
+fn create(o: &Opts, json: bool) -> Result<()> {
     let name = o.need("name")?;
     let threshold: u32 = o
         .get("threshold")
@@ -934,14 +939,15 @@ fn create(o: &Opts, json: bool) -> Result<(), String> {
         return Err(format!(
             "a vault needs 2 to {MAX_COSIGNERS} cosigners; give {} external xpub(s)",
             total.saturating_sub(1)
-        ));
+        )
+        .into());
     }
 
     banner();
     section("Create multisig vault");
     println!();
-    let wallet_name = crate::choose_wallet(o.get("wallet"))?;
-    let opened = crate::unlock_wallet(&wallet_name)?;
+    let wallet_name = crate::cli::choose_wallet(o.get("wallet"))?;
+    let opened = crate::cli::unlock_wallet(&wallet_name)?;
     let network = opened.network;
     let label = o.get("label").unwrap_or("this device").to_string();
     let me = device_cosigner(&opened, &label)?;
@@ -1008,7 +1014,7 @@ fn create(o: &Opts, json: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn list(json: bool) -> Result<(), String> {
+fn list(json: bool) -> Result<()> {
     let vaults = list_vaults()?;
     if json {
         println!(
@@ -1051,7 +1057,7 @@ fn list(json: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn info(o: &Opts, json: bool) -> Result<(), String> {
+fn info(o: &Opts, json: bool) -> Result<()> {
     let vault = load(o.need("name")?)?;
     let first = vault.address(0, 0)?;
     if json {
@@ -1105,7 +1111,7 @@ fn short_xpub(xpub: &str) -> String {
     }
 }
 
-fn address(o: &Opts, json: bool) -> Result<(), String> {
+fn address(o: &Opts, json: bool) -> Result<()> {
     let vault = load(o.need("name")?)?;
     let count: u32 = o
         .get("count")
@@ -1149,7 +1155,7 @@ fn address(o: &Opts, json: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn scan(vault: &Vault) -> Result<Vec<Coin>, String> {
+fn scan(vault: &Vault) -> Result<Vec<Coin>> {
     let net = esplora::net_for(vault.network()?)?;
     let mut lookup: std::collections::HashMap<String, (u32, u32)> =
         std::collections::HashMap::new();
@@ -1175,7 +1181,7 @@ fn scan(vault: &Vault) -> Result<Vec<Coin>, String> {
     Ok(coins)
 }
 
-fn balance(o: &Opts, json: bool) -> Result<(), String> {
+fn balance(o: &Opts, json: bool) -> Result<()> {
     let vault = load(o.need("name")?)?;
     let coins = spin("Scanning the vault…", || scan(&vault))?;
     let total: u64 = coins
@@ -1225,7 +1231,7 @@ fn balance(o: &Opts, json: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn create_spend(o: &Opts) -> Result<(), String> {
+fn create_spend(o: &Opts) -> Result<()> {
     let vault = load(o.need("name")?)?;
     let network = vault.network()?;
     let to = send::parse_address(o.need("to")?, network)?;
@@ -1296,15 +1302,15 @@ fn create_spend(o: &Opts) -> Result<(), String> {
     Ok(())
 }
 
-fn sign(o: &Opts) -> Result<(), String> {
+fn sign(o: &Opts) -> Result<()> {
     let vault = load(o.need("name")?)?;
     let input = o.need("psbt")?.to_string();
     let mut psbt = read_psbt(&input)?;
     banner();
     section("Sign a vault PSBT");
     println!();
-    let wallet_name = crate::choose_wallet(o.get("wallet"))?;
-    let opened = crate::unlock_wallet(&wallet_name)?;
+    let wallet_name = crate::cli::choose_wallet(o.get("wallet"))?;
+    let opened = crate::cli::unlock_wallet(&wallet_name)?;
     let signer = Signer::from_opened(&opened)?;
     drop(opened);
 
@@ -1331,15 +1337,17 @@ fn sign(o: &Opts) -> Result<(), String> {
     Ok(())
 }
 
-fn combine(o: &Opts) -> Result<(), String> {
+fn combine(o: &Opts) -> Result<()> {
     if o.pos.len() < 3 {
-        return Err("usage: cairn multisig combine <A.psbt> <B.psbt> [...] [--out FILE]".into());
+        return Err(crate::error::Error::input(
+            "usage: cairn multisig combine <A.psbt> <B.psbt> [...] [--out FILE]",
+        ));
     }
     let mut merged = read_psbt(&o.pos[1])?;
     for path in &o.pos[2..] {
         let other = read_psbt(path)?;
         if other.unsigned_tx != merged.unsigned_tx {
-            return Err(format!("{path} is a different transaction"));
+            return Err(format!("{path} is a different transaction").into());
         }
         merged
             .combine(other)
@@ -1358,7 +1366,7 @@ fn combine(o: &Opts) -> Result<(), String> {
     Ok(())
 }
 
-fn finalize_cmd(o: &Opts) -> Result<(), String> {
+fn finalize_cmd(o: &Opts) -> Result<()> {
     let path = o.need("psbt")?;
     let mut psbt = read_psbt(path)?;
     let tx = finalize(&mut psbt)?;
@@ -1400,8 +1408,8 @@ fn finalize_cmd(o: &Opts) -> Result<(), String> {
                 ok("Broadcast");
                 println!("  {}\n", style(server).cyan());
             }
-            Err(e) if e.starts_with("REJECTED:") => return Err(e),
-            Err(e) => return Err(format!("Broadcast status unknown: {e}")),
+            Err(e) if e.kind() == crate::error::Kind::Rejected => return Err(e),
+            Err(e) => return Err(format!("Broadcast status unknown: {e}").into()),
         }
         pause();
         return Ok(());

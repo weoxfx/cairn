@@ -4,6 +4,8 @@
 //! parsing-adjacent invariants and the sat arithmetic without needing keys, so
 //! the same code can be exercised on arbitrary bytes.
 
+use crate::error::Result;
+
 use crate::network;
 use bitcoin::psbt::Psbt;
 use bitcoin::EcdsaSighashType;
@@ -17,7 +19,7 @@ pub const MAX_PSBT_OUTPUTS: usize = 500;
 /// Check structure, signedness, previous-transaction consistency and amounts.
 /// Returns `(total_in, total_out)` in sats. Ownership, scripts and keys are
 /// checked by the caller.
-pub fn check_structure(psbt: &Psbt) -> Result<(u64, u64), String> {
+pub fn check_structure(psbt: &Psbt) -> Result<(u64, u64)> {
     let tx = &psbt.unsigned_tx;
     if psbt.inputs.len() != tx.input.len() || psbt.outputs.len() != tx.output.len() {
         return Err("malformed PSBT: input/output counts do not match the transaction".into());
@@ -26,23 +28,25 @@ pub fn check_structure(psbt: &Psbt) -> Result<(u64, u64), String> {
         return Err(format!(
             "PSBT has too many inputs ({}; limit {MAX_PSBT_INPUTS})",
             tx.input.len()
-        ));
+        )
+        .into());
     }
     if tx.output.len() > MAX_PSBT_OUTPUTS {
         return Err(format!(
             "PSBT has too many outputs ({}; limit {MAX_PSBT_OUTPUTS})",
             tx.output.len()
-        ));
+        )
+        .into());
     }
 
     let mut total_in = 0u64;
     let mut outpoints = HashSet::new();
     for (i, (txin, input)) in tx.input.iter().zip(&psbt.inputs).enumerate() {
         if !outpoints.insert(txin.previous_output) {
-            return Err(format!("input {i} repeats an outpoint"));
+            return Err(format!("input {i} repeats an outpoint").into());
         }
         if !txin.script_sig.is_empty() || !txin.witness.is_empty() {
-            return Err(format!("input {i} is not unsigned"));
+            return Err(format!("input {i} is not unsigned").into());
         }
         if !input.partial_sigs.is_empty()
             || input.final_script_witness.is_some()
@@ -57,37 +61,36 @@ pub fn check_structure(psbt: &Psbt) -> Result<(u64, u64), String> {
         if utxo.script_pubkey.is_p2tr() {
             // BIP371 taproot input: one key-path origin and an internal key.
             if input.tap_key_origins.len() != 1 {
-                return Err(format!(
-                    "input {i} must have exactly one taproot key origin"
-                ));
+                return Err(format!("input {i} must have exactly one taproot key origin").into());
             }
             if input.tap_internal_key.is_none() {
-                return Err(format!("input {i} has no taproot internal key"));
+                return Err(format!("input {i} has no taproot internal key").into());
             }
             let (_xonly, (leaves, _)) = input.tap_key_origins.iter().next().unwrap();
             if !leaves.is_empty() {
                 return Err(format!(
                     "input {i} spends a taproot script path, which Cairn cannot sign"
-                ));
+                )
+                .into());
             }
         } else {
             if !matches!(input.ecdsa_hash_ty(), Ok(EcdsaSighashType::All)) {
-                return Err(format!("input {i} does not use SIGHASH_ALL"));
+                return Err(format!("input {i} does not use SIGHASH_ALL").into());
             }
             if input.bip32_derivation.len() != 1 {
-                return Err(format!("input {i} must have exactly one BIP32 key origin"));
+                return Err(format!("input {i} must have exactly one BIP32 key origin").into());
             }
         }
         if utxo.value.to_sat() > network::MAX_MONEY_SATS {
-            return Err(format!("input {i} value exceeds the 21 million BTC supply"));
+            return Err(format!("input {i} value exceeds the 21 million BTC supply").into());
         }
         // If the full previous transaction is supplied, it must describe the
         // same output as the witness UTXO.
         if let Some(prev) = &input.non_witness_utxo {
             if prev.compute_txid() != txin.previous_output.txid {
-                return Err(format!(
-                    "input {i}: previous transaction does not match the outpoint"
-                ));
+                return Err(
+                    format!("input {i}: previous transaction does not match the outpoint").into(),
+                );
             }
             let out = prev
                 .output
@@ -96,7 +99,8 @@ pub fn check_structure(psbt: &Psbt) -> Result<(u64, u64), String> {
             if out.value != utxo.value || out.script_pubkey != utxo.script_pubkey {
                 return Err(format!(
                     "input {i}: previous transaction disagrees with the witness UTXO"
-                ));
+                )
+                .into());
             }
         }
         total_in = total_in

@@ -8,6 +8,8 @@
 //!
 //! Every function from the previous version keeps its signature.
 
+use crate::error::Result;
+
 use bitcoin::Network;
 use console::{colors_enabled, measure_text_width, style, Style, Term};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
@@ -456,22 +458,24 @@ pub fn pause() {
         .unwrap_or_default();
 }
 
-pub fn menu(items: &[&str]) -> Result<usize, String> {
+pub fn menu(items: &[&str]) -> Result<usize> {
     Select::with_theme(&theme())
         .items(items)
         .default(0)
         .interact()
         .map_err(|e| e.to_string())
+        .map_err(crate::error::Error::from)
 }
 
 /// Menu with a question above it.
-pub fn menu_titled(prompt: &str, items: &[&str]) -> Result<usize, String> {
+pub fn menu_titled(prompt: &str, items: &[&str]) -> Result<usize> {
     Select::with_theme(&theme())
         .with_prompt(prompt)
         .items(items)
         .default(0)
         .interact()
         .map_err(|e| e.to_string())
+        .map_err(crate::error::Error::from)
 }
 
 /// Yes/no question. Cancelling counts as "no".
@@ -484,11 +488,12 @@ pub fn confirm(prompt: &str, default: bool) -> bool {
 }
 
 /// Single-line text prompt.
-pub fn ask(prompt: &str) -> Result<String, String> {
+pub fn ask(prompt: &str) -> Result<String> {
     Input::<String>::with_theme(&theme())
         .with_prompt(prompt)
         .interact_text()
         .map_err(|e| e.to_string())
+        .map_err(crate::error::Error::from)
 }
 
 // ───────────────────────────── progress ─────────────────────────────

@@ -9,6 +9,8 @@
 //! or signed PSBT). The checksum detects corruption, while the normal wallet
 //! verification protects against a malicious PSBT.
 
+use crate::error::Result;
+
 use bitcoin::hashes::{sha256, Hash};
 use console::Term;
 use image::GrayImage;
@@ -30,11 +32,11 @@ const CHROME_ROWS: usize = 3;
 const CHROME_COLS: usize = 2;
 
 /// Split a PSBT into QR-sized text frames.
-pub fn encode_frames(data: &[u8]) -> Result<Vec<String>, String> {
+pub fn encode_frames(data: &[u8]) -> Result<Vec<String>> {
     encode_frames_with(data, CHUNK_BYTES)
 }
 
-fn encode_frames_with(data: &[u8], chunk_bytes: usize) -> Result<Vec<String>, String> {
+fn encode_frames_with(data: &[u8], chunk_bytes: usize) -> Result<Vec<String>> {
     if data.is_empty() {
         return Err("nothing to encode".into());
     }
@@ -43,7 +45,8 @@ fn encode_frames_with(data: &[u8], chunk_bytes: usize) -> Result<Vec<String>, St
     if total > MAX_FRAMES {
         return Err(format!(
             "PSBT is too large for QR transfer ({total} frames, max {MAX_FRAMES})"
-        ));
+        )
+        .into());
     }
     let sum = checksum(data);
     Ok(data
@@ -54,7 +57,7 @@ fn encode_frames_with(data: &[u8], chunk_bytes: usize) -> Result<Vec<String>, St
 }
 
 /// Rebuild a PSBT from scanned frames, in any order and with duplicates.
-pub fn reassemble(payloads: &[String]) -> Result<Vec<u8>, String> {
+pub fn reassemble(payloads: &[String]) -> Result<Vec<u8>> {
     if payloads.is_empty() {
         return Err("no QR frames were found".into());
     }
@@ -86,7 +89,8 @@ pub fn reassemble(payloads: &[String]) -> Result<Vec<u8>, String> {
                 return Err(format!(
                     "QR frame {} appears twice with different data",
                     frame.index + 1
-                ));
+                )
+                .into());
             }
         } else {
             chunks[frame.index] = Some(frame.bytes);
@@ -115,7 +119,7 @@ struct Frame {
     bytes: Vec<u8>,
 }
 
-fn parse_frame(payload: &str) -> Result<Frame, String> {
+fn parse_frame(payload: &str) -> Result<Frame> {
     let payload = payload.trim();
     let mut parts = payload.splitn(5, ':');
     let prefix = parts.next().unwrap_or_default();
@@ -128,7 +132,7 @@ fn parse_frame(payload: &str) -> Result<Frame, String> {
         .parse::<usize>()
         .map_err(|_| "malformed QR frame: bad frame count")?;
     if total == 0 || total > MAX_FRAMES {
-        return Err(format!("malformed QR frame: invalid frame count {total}"));
+        return Err(format!("malformed QR frame: invalid frame count {total}").into());
     }
     let index = parts
         .next()
@@ -167,7 +171,7 @@ fn checksum(data: &[u8]) -> String {
 }
 
 /// Render one frame as terminal art, without the surrounding chrome.
-fn render(payload: &str) -> Result<String, String> {
+fn render(payload: &str) -> Result<String> {
     let code = QrCode::new(payload.as_bytes()).map_err(|e| e.to_string())?;
     Ok(code
         .render::<unicode::Dense1x2>()
@@ -189,7 +193,7 @@ fn art_dimensions(art: &str) -> (usize, usize) {
 
 /// Largest chunk whose QR art fits the current terminal. Smaller terminals
 /// need more, smaller frames; larger ones get the fewest possible frames.
-fn chunk_for_terminal(data: &[u8], cols: usize, rows: usize) -> Result<usize, String> {
+fn chunk_for_terminal(data: &[u8], cols: usize, rows: usize) -> Result<usize> {
     let max_width = cols.saturating_sub(CHROME_COLS).max(1);
     let max_height = rows.saturating_sub(CHROME_ROWS).max(1);
 
@@ -217,11 +221,12 @@ fn chunk_for_terminal(data: &[u8], cols: usize, rows: usize) -> Result<usize, St
          or redirect `--qr-show` to a file and print the frames some other way",
         width + CHROME_COLS,
         height + CHROME_ROWS
-    ))
+    )
+    .into())
 }
 
 /// Show every QR frame. Returns the number of frames displayed.
-pub fn show(data: &[u8]) -> Result<usize, String> {
+pub fn show(data: &[u8]) -> Result<usize> {
     let is_terminal = std::io::stdout().is_terminal();
     let frames = if is_terminal {
         // `console` reports (rows, columns).
@@ -234,7 +239,7 @@ pub fn show(data: &[u8]) -> Result<usize, String> {
     let art: Vec<String> = frames
         .iter()
         .map(|frame| render(frame))
-        .collect::<Result<_, _>>()?;
+        .collect::<std::result::Result<_, _>>()?;
 
     if !is_terminal {
         for (i, image) in art.iter().enumerate() {
@@ -271,12 +276,12 @@ pub fn show(data: &[u8]) -> Result<usize, String> {
 }
 
 /// Read every QR code found in the given image files.
-pub fn scan_images(paths: &[String]) -> Result<Vec<String>, String> {
+pub fn scan_images(paths: &[String]) -> Result<Vec<String>> {
     if paths.is_empty() {
         return Err("no image files given".into());
     }
     if paths.len() > MAX_IMAGES {
-        return Err(format!("too many image files (max {MAX_IMAGES})"));
+        return Err(format!("too many image files (max {MAX_IMAGES})").into());
     }
     let mut payloads = Vec::new();
     for path in paths {
@@ -295,7 +300,7 @@ pub fn scan_images(paths: &[String]) -> Result<Vec<String>, String> {
             .to_luma8();
         let found = decode_image(&img);
         if found.is_empty() {
-            return Err(format!("no readable QR code found in {path}"));
+            return Err(format!("no readable QR code found in {path}").into());
         }
         payloads.extend(found);
     }

@@ -22,6 +22,13 @@ cargo test --locked --release -- --test-threads=1
 cargo audit
 ```
 
+Fuzzing (targets are listed in `fuzz/Cargo.toml`; CI runs a short smoke on every PR that
+touches the parsers):
+
+```
+cargo +nightly-2026-11-01 fuzz run qr_frames -- -max_total_time=60
+```
+
 ## Pull requests
 
 - Keep them small and focused, and explain the why.

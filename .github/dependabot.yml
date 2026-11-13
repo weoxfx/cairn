@@ -1,0 +1,30 @@
+version: 2
+# Dependency updates are security work for a self-custody wallet: a yanked or
+# patched crate should arrive as a reviewed pull request, not go unnoticed
+# between audits. CI (clippy, tests, cargo-deny, cargo-audit) gates every PR.
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: cargo
+    directory: "/fuzz"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+
+  # Actions are pinned by commit SHA; this keeps the SHAs current.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      actions:
+        patterns: ["*"]

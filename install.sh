@@ -7,6 +7,11 @@ install_dir="${CAIRN_INSTALL_DIR:-}"
 source_ref="${CAIRN_SOURCE_REF:-master}"
 from_source="${CAIRN_FROM_SOURCE:-0}"
 
+# The project's minisign public key. Paste the published key here when it is
+# created (see RELEASE-SIGNING.md): with it in place every install verifies the
+# signed manifest by default, instead of only when the user remembers to ask.
+default_pubkey=""
+
 usage() {
     cat <<EOF
 Install Cairn.
@@ -24,7 +29,10 @@ Environment:
   CAIRN_FROM_SOURCE      Set to 1 for a source build.
   CAIRN_MINISIGN_PUBKEY  Minisign public key used to verify SHA256SUMS.
                          Without it, only the archive checksum is checked and
-                         a warning is printed.
+                         a warning is printed (unless the release is signed and
+                         no key is configured, which is refused).
+  CAIRN_ACCEPT_UNSIGNED  Set to 1 to install anyway when the release publishes
+                         a signature but no public key is configured.
 EOF
 }
 
@@ -201,7 +209,7 @@ fi
 
 archive="cairn-${version}-${target}.tar.gz"
 base="https://github.com/$repo/releases/download/$version"
-pubkey="${CAIRN_MINISIGN_PUBKEY:-}"
+pubkey="${CAIRN_MINISIGN_PUBKEY:-$default_pubkey}"
 
 sha256_check() {
     if command -v sha256sum >/dev/null 2>&1; then
@@ -232,6 +240,16 @@ if [ -n "$pubkey" ]; then
     fi
     sha256_check "$archive.manifest.sha256"
 else
+    # A published signature with no pinned key is worse than none: it looks like
+    # authentication without being any. Refuse unless the user opts out.
+    if curl -fsSL --proto '=https' -o /dev/null "$base/SHA256SUMS.minisig" 2>/dev/null; then
+        if [ "${CAIRN_ACCEPT_UNSIGNED:-0}" != 1 ]; then
+            printf 'error: this release is signed, but no project public key is configured.\n' >&2
+            printf 'error: set CAIRN_MINISIGN_PUBKEY to the published key (RELEASE-SIGNING.md),\n' >&2
+            printf 'error: or set CAIRN_ACCEPT_UNSIGNED=1 to install without verifying it.\n' >&2
+            exit 1
+        fi
+    fi
     printf 'warning: CAIRN_MINISIGN_PUBKEY is not set.\n' >&2
     printf 'warning: the download is checked against an unsigned checksum, not a\n' >&2
     printf 'warning: signed manifest. Set CAIRN_MINISIGN_PUBKEY to the project key\n' >&2

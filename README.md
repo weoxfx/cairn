@@ -396,8 +396,23 @@ inspected set was wrong.
 
 `--json` currently covers `--version`, `--descriptor`, `--label`, `security check` and every
 `cairn evm` subcommand. It is intended for scripts and integration tests, not for interactive use.
-Errors still go to stderr as text, and `cairn evm` requires an explicit wallet name with `--json`
-so the output can never be mixed with an interactive picker.
+`cairn evm` requires an explicit wallet name with `--json` so the output can never be mixed with an
+interactive picker.
+
+Failures in `--json` mode print one object with a stable code instead of prose, and the exit status
+says what went wrong without parsing anything:
+
+```
+{"error":{"code":"input","message":"usage: cairn --label <TXID> <LABEL>"}}
+```
+
+| Exit status | Code | Meaning |
+|---|---|---|
+| 0 | — | success |
+| 1 | `error` / `state` | anything else, or a local wallet/file problem |
+| 2 | `input` | the invocation or the supplied value is wrong |
+| 3 | `rejected` | the backend refused it (a rejected transaction, a definitive 4xx) |
+| 4 | `network` | no usable answer from the backend; another endpoint or a retry may work |
 
 ## Development
 

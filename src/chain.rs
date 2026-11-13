@@ -8,6 +8,8 @@
 //! The default stays Esplora. Set `CAIRN_BACKEND=electrum` (or `CAIRN_ELECTRUM`
 //! to a `host:port`) to use Electrum instead.
 
+use crate::error::Result;
+
 use crate::electrum;
 use crate::esplora::{self, Net, Rates, Utxo, WalletState};
 use crate::wallet::Watch;
@@ -24,7 +26,7 @@ pub fn backend_name() -> &'static str {
     }
 }
 
-pub fn sync(watch: &Watch, gap: u32, prev: Option<&WalletState>) -> Result<WalletState, String> {
+pub fn sync(watch: &Watch, gap: u32, prev: Option<&WalletState>) -> Result<WalletState> {
     if uses_electrum() {
         electrum::sync(watch, gap, prev)
     } else {
@@ -32,7 +34,7 @@ pub fn sync(watch: &Watch, gap: u32, prev: Option<&WalletState>) -> Result<Walle
     }
 }
 
-pub fn utxos_for(net: Net, addrs: &[String]) -> Result<Vec<Utxo>, String> {
+pub fn utxos_for(net: Net, addrs: &[String]) -> Result<Vec<Utxo>> {
     if uses_electrum() {
         electrum::utxos_for(net, addrs)
     } else {
@@ -40,7 +42,7 @@ pub fn utxos_for(net: Net, addrs: &[String]) -> Result<Vec<Utxo>, String> {
     }
 }
 
-pub fn fee_rates(net: Net) -> Result<Rates, String> {
+pub fn fee_rates(net: Net) -> Result<Rates> {
     if uses_electrum() {
         electrum::fee_rates(net)
     } else {
@@ -48,7 +50,7 @@ pub fn fee_rates(net: Net) -> Result<Rates, String> {
     }
 }
 
-pub fn broadcast(net: Net, hex: &str) -> Result<String, String> {
+pub fn broadcast(net: Net, hex: &str) -> Result<String> {
     if uses_electrum() {
         electrum::broadcast(net, hex)
     } else {
@@ -56,7 +58,7 @@ pub fn broadcast(net: Net, hex: &str) -> Result<String, String> {
     }
 }
 
-pub fn verify_prevouts(net: Net, utxos: &[Utxo]) -> Result<(), String> {
+pub fn verify_prevouts(net: Net, utxos: &[Utxo]) -> Result<()> {
     if uses_electrum() {
         electrum::verify_prevouts(net, utxos)
     } else {

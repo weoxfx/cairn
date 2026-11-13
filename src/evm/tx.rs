@@ -6,6 +6,8 @@
 //! trusting the machine that built it, and `cairn evm sign` performs no network
 //! I/O at all.
 
+use crate::error::Result;
+
 use crate::evm::abi;
 use crate::evm::address;
 use crate::evm::chains::Chain;
@@ -68,35 +70,37 @@ pub struct SignedTx {
 }
 
 impl UnsignedTx {
-    pub fn parse_field(name: &str, s: &str) -> Result<U256, String> {
-        U256::from_dec_str(s.trim()).map_err(|_| format!("{name} is not a decimal integer"))
+    pub fn parse_field(name: &str, s: &str) -> Result<U256> {
+        U256::from_dec_str(s.trim())
+            .map_err(|_| format!("{name} is not a decimal integer"))
+            .map_err(crate::error::Error::from)
     }
 
-    pub fn value_wei(&self) -> Result<U256, String> {
+    pub fn value_wei(&self) -> Result<U256> {
         Self::parse_field("value", &self.value)
     }
 
-    pub fn gas_limit(&self) -> Result<U256, String> {
+    pub fn gas_limit(&self) -> Result<U256> {
         Self::parse_field("gas", &self.gas)
     }
 
-    pub fn max_fee(&self) -> Result<U256, String> {
+    pub fn max_fee(&self) -> Result<U256> {
         Self::parse_field("max_fee_per_gas", &self.max_fee_per_gas)
     }
 
-    pub fn priority_fee(&self) -> Result<U256, String> {
+    pub fn priority_fee(&self) -> Result<U256> {
         Self::parse_field("max_priority_fee_per_gas", &self.max_priority_fee_per_gas)
     }
 
-    pub fn nonce_value(&self) -> Result<U256, String> {
+    pub fn nonce_value(&self) -> Result<U256> {
         Self::parse_field("nonce", &self.nonce)
     }
 
-    pub fn to_bytes(&self) -> Result<[u8; 20], String> {
+    pub fn to_bytes(&self) -> Result<[u8; 20]> {
         address::parse_address(&self.to)
     }
 
-    pub fn data_bytes(&self) -> Result<Vec<u8>, String> {
+    pub fn data_bytes(&self) -> Result<Vec<u8>> {
         let body = self
             .data
             .strip_prefix("0x")
@@ -108,14 +112,16 @@ impl UnsignedTx {
         if !body.len().is_multiple_of(2) {
             return Err("calldata has an odd number of hex digits".into());
         }
-        hex::decode(body).map_err(|_| "calldata is not valid hex".to_string())
+        hex::decode(body)
+            .map_err(|_| "calldata is not valid hex".to_string())
+            .map_err(crate::error::Error::from)
     }
 
     /// Full structural check. Used before signing and again before broadcast,
     /// so a file that was edited between the two steps is rejected.
-    pub fn validate(&self, allow_high_fee: bool) -> Result<(), String> {
+    pub fn validate(&self, allow_high_fee: bool) -> Result<()> {
         if self.kind != "eip1559" {
-            return Err(format!("unsupported transaction kind '{}'", self.kind));
+            return Err(format!("unsupported transaction kind '{}'", self.kind).into());
         }
         if self.chain_id == 0 {
             return Err("transaction has no chain id".into());
@@ -138,7 +144,8 @@ impl UnsignedTx {
             return Err(format!(
                 "gas limit {} is outside {MIN_GAS_LIMIT}..={MAX_GAS_LIMIT}",
                 gas
-            ));
+            )
+            .into());
         }
         let nonce = self.nonce_value()?;
         if nonce > U256::from(u64::MAX) {
@@ -155,7 +162,7 @@ impl UnsignedTx {
                 "maximum fee {} gwei is above the {} gwei safety ceiling; pass --force-fee if this is intended",
                 units::format_units(max_fee, 9),
                 FEE_CEILING_GWEI
-            ));
+            ).into());
         }
         if let Some(t) = &self.token {
             let token_addr = address::parse_address(&t.address)?;
@@ -189,7 +196,7 @@ impl UnsignedTx {
     }
 
     /// The nine RLP items of the unsigned EIP-1559 payload.
-    pub fn payload_items(&self) -> Result<Vec<Vec<u8>>, String> {
+    pub fn payload_items(&self) -> Result<Vec<Vec<u8>>> {
         let to = self.to_bytes()?;
         let data = self.data_bytes()?;
         Ok(vec![
@@ -206,14 +213,14 @@ impl UnsignedTx {
     }
 
     /// `keccak256(0x02 || rlp([...]))` — the digest that gets signed.
-    pub fn digest(&self) -> Result<[u8; 32], String> {
+    pub fn digest(&self) -> Result<[u8; 32]> {
         let mut payload = vec![TX_TYPE];
         payload.extend(rlp::encode_list(&self.payload_items()?));
         Ok(address::keccak(&payload))
     }
 
     /// Worst-case native cost: value plus the full gas limit at the maximum fee.
-    pub fn max_native_cost(&self) -> Result<U256, String> {
+    pub fn max_native_cost(&self) -> Result<U256> {
         let gas_cost = self
             .gas_limit()?
             .checked_mul(self.max_fee()?)
@@ -221,19 +228,21 @@ impl UnsignedTx {
         self.value_wei()?
             .checked_add(gas_cost)
             .ok_or_else(|| "total cost overflows".to_string())
+            .map_err(crate::error::Error::from)
     }
 
-    pub fn ensure_chain(&self, chain: &Chain) -> Result<(), String> {
+    pub fn ensure_chain(&self, chain: &Chain) -> Result<()> {
         if self.chain_id != chain.chain_id {
             return Err(format!(
                 "transaction is for chain {} but {} (chain {}) was selected",
                 self.chain_id, chain.name, chain.chain_id
-            ));
+            )
+            .into());
         }
         Ok(())
     }
 
-    pub fn sign(&self, key: &SecretKey, allow_high_fee: bool) -> Result<SignedTx, String> {
+    pub fn sign(&self, key: &SecretKey, allow_high_fee: bool) -> Result<SignedTx> {
         self.validate(allow_high_fee)?;
         let secp = Secp256k1::new();
         let msg = Message::from_digest(self.digest()?);
@@ -261,15 +270,17 @@ impl UnsignedTx {
 }
 
 impl SignedTx {
-    pub fn raw_bytes(&self) -> Result<Vec<u8>, String> {
+    pub fn raw_bytes(&self) -> Result<Vec<u8>> {
         let body = self
             .raw
             .strip_prefix("0x")
             .ok_or("signed transaction is not hex-prefixed")?;
-        hex::decode(body).map_err(|_| "signed transaction is not valid hex".to_string())
+        hex::decode(body)
+            .map_err(|_| "signed transaction is not valid hex".to_string())
+            .map_err(crate::error::Error::from)
     }
 
-    pub fn validate(&self, allow_high_fee: bool) -> Result<(), String> {
+    pub fn validate(&self, allow_high_fee: bool) -> Result<()> {
         self.tx.validate(allow_high_fee)?;
         let raw = self.raw_bytes()?;
         if raw.len() < 9 || raw.len() > MAX_DATA_BYTES + 4096 {
@@ -289,7 +300,8 @@ impl SignedTx {
             if expected.as_slice() != items[i] {
                 return Err(format!(
                     "signed transaction disagrees with its description at field {i}"
-                ));
+                )
+                .into());
             }
         }
         let hash = format!("0x{}", hex::encode(address::keccak(&raw)));
@@ -303,7 +315,7 @@ impl SignedTx {
 // ── minimal RLP reader (validation only) ──
 
 /// Read one RLP header: `(payload start, payload length, is_list)`.
-fn read_header(buf: &[u8], at: usize) -> Result<(usize, usize, bool), String> {
+fn read_header(buf: &[u8], at: usize) -> Result<(usize, usize, bool)> {
     let b = *buf.get(at).ok_or("truncated RLP")?;
     if b < 0x80 {
         return Ok((at, 1, false));
@@ -323,7 +335,7 @@ fn read_header(buf: &[u8], at: usize) -> Result<(usize, usize, bool), String> {
     Ok((start, len, is_list))
 }
 
-fn be_len(buf: &[u8], at: usize, n: usize) -> Result<usize, String> {
+fn be_len(buf: &[u8], at: usize, n: usize) -> Result<usize> {
     if n == 0 || n > 8 {
         return Err("RLP length has an impossible width".into());
     }
@@ -332,12 +344,14 @@ fn be_len(buf: &[u8], at: usize, n: usize) -> Result<usize, String> {
     for b in bytes {
         v = (v << 8) | u64::from(*b);
     }
-    usize::try_from(v).map_err(|_| "RLP length overflow".to_string())
+    usize::try_from(v)
+        .map_err(|_| "RLP length overflow".to_string())
+        .map_err(crate::error::Error::from)
 }
 
 /// Payload bytes of one encoded string item.
-#[cfg(test)]
-fn item_payload(encoded: &[u8]) -> Result<&[u8], String> {
+#[cfg(any(test, feature = "fuzzing"))]
+fn item_payload(encoded: &[u8]) -> Result<&[u8]> {
     let (start, len, is_list) = read_header(encoded, 0)?;
     if is_list {
         return Err("expected an RLP string, found a list".into());
@@ -345,11 +359,11 @@ fn item_payload(encoded: &[u8]) -> Result<&[u8], String> {
     let end = start.checked_add(len).ok_or("RLP overflow")?;
     encoded
         .get(start..end)
-        .ok_or_else(|| "truncated RLP item".to_string())
+        .ok_or_else(|| "truncated RLP item".into())
 }
 
 /// Fully encoded items of a top-level RLP list.
-fn list_items(buf: &[u8]) -> Result<Vec<&[u8]>, String> {
+fn list_items(buf: &[u8]) -> Result<Vec<&[u8]>> {
     let (start, len, is_list) = read_header(buf, 0)?;
     if !is_list {
         return Err("expected an RLP list".into());
@@ -377,6 +391,17 @@ pub fn now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Fuzz entry point: the RLP reader the signed-transaction checks walk.
+///
+/// Its inputs come from transaction files and from a node's replies, so a
+/// malformed length or nesting must never panic or allocate unbounded memory.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_rlp(data: &[u8]) {
+    let _ = read_header(data, 0);
+    let _ = item_payload(data);
+    let _ = list_items(data);
 }
 
 #[cfg(test)]

@@ -6,6 +6,8 @@
 //! server cannot steer the bump at someone else's coins or a different
 //! recipient. The same fee ceiling and rate ceiling as a normal send apply.
 
+use crate::error::Result;
+
 use crate::esplora::{self, WalletState};
 use crate::network;
 use crate::send::{self, Plan};
@@ -41,7 +43,7 @@ pub(crate) fn plan_bump(
     old_vsize: u64,
     change: u64,
     target_rate: f64,
-) -> Result<Bump, String> {
+) -> Result<Bump> {
     if old_vsize == 0 {
         return Err("cannot bump a transaction with no size".into());
     }
@@ -52,14 +54,16 @@ pub(crate) fn plan_bump(
         return Err(format!(
             "fee rate is above the {:.0} sat/vB ceiling",
             network::MAX_FEE_RATE
-        ));
+        )
+        .into());
     }
     let old_rate = old_fee as f64 / old_vsize as f64;
     if target_rate < old_rate + MIN_RATE_INCREASE {
         return Err(format!(
             "A replacement must pay a higher rate: use at least {:.1} sat/vB",
             old_rate + MIN_RATE_INCREASE
-        ));
+        )
+        .into());
     }
     let fee = (target_rate * old_vsize as f64).ceil() as u64;
     if fee <= old_fee {
@@ -70,7 +74,8 @@ pub(crate) fn plan_bump(
         return Err(format!(
             "Not enough change: paying {} sats more would leave less than the {} sat dust limit",
             delta, MIN_CHANGE
-        ));
+        )
+        .into());
     }
     Ok(Bump {
         fee,
@@ -80,15 +85,15 @@ pub(crate) fn plan_bump(
     })
 }
 
-fn total_out(outputs: &[bitcoin::TxOut]) -> Result<u64, String> {
+fn total_out(outputs: &[bitcoin::TxOut]) -> Result<u64> {
     outputs
         .iter()
         .try_fold(0u64, |a, o| a.checked_add(o.value.to_sat()))
-        .ok_or_else(|| "output total overflows".to_string())
+        .ok_or_else(|| crate::error::Error::input("output total overflows"))
 }
 
 /// Returns Ok(true) when a replacement was broadcast.
-pub fn bump_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Result<bool, String> {
+pub fn bump_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Result<bool> {
     if crate::chain::uses_electrum() {
         return Err(
             "fee bumping uses the Esplora backend's transaction view; unset CAIRN_BACKEND/CAIRN_ELECTRUM or use the dashboard's send flow instead"
@@ -264,7 +269,7 @@ pub fn bump_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
         return Ok(false);
     }
 
-    let opened = crate::unlock_wallet_with(name, Some(fp), "Password to sign")?;
+    let opened = crate::cli::unlock_wallet_with(name, Some(fp), "Password to sign")?;
     if opened.network != network {
         return Err("Wallet network changed. Nothing was replaced.".into());
     }
@@ -329,8 +334,8 @@ pub fn bump_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
             pause();
             Ok(true)
         }
-        Err(e) if e.starts_with("REJECTED:") => Err(e),
-        Err(e) => Err(format!("Broadcast status unknown: {e}")),
+        Err(e) if e.kind() == crate::error::Kind::Rejected => Err(e),
+        Err(e) => Err(format!("Broadcast status unknown: {e}").into()),
     }
 }
 

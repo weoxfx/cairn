@@ -9,7 +9,7 @@ a release.
 
 | Input | Pin |
 |---|---|
-| Rust toolchain | `1.98.1` (`.github/workflows/ci.yml`, `release.yml`) |
+| Rust toolchain | `1.98.1`, pinned in `rust-toolchain.toml` and repeated in `.github/workflows/ci.yml` and `release.yml` |
 | Dependency graph | `Cargo.lock`, built with `--locked` |
 | Build profile | `Cargo.toml` release profile (`lto = "fat"`, `codegen-units = 1`, `incremental = false`, `strip = true`) |
 | Path mapping | `--remap-path-prefix=<workspace>=/cairn`, `--remap-path-prefix=$HOME/.cargo=/cargo` |
@@ -23,7 +23,7 @@ GitHub Actions are pinned by commit SHA in all workflows.
 git clone https://github.com/weoxfx/cairn
 cd cairn
 git checkout <release-tag>
-rustup toolchain install 1.98.1 --profile minimal
+# rust-toolchain.toml selects the pinned compiler automatically.
 export SOURCE_DATE_EPOCH=0
 export RUSTFLAGS="--remap-path-prefix=$PWD=/cairn --remap-path-prefix=$HOME/.cargo=/cargo"
 cargo build --locked --release

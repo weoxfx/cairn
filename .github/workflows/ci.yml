@@ -40,6 +40,20 @@ jobs:
         run: ./target/release/cairn.exe --help
         shell: bash
 
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7
+        with:
+          toolchain: 1.98.1
+          components: clippy
+      - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a
+      # Two macOS binaries are released, so the suite runs here too rather than
+      # only compiling: the unix hardening paths are not Linux-only.
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --release -- --test-threads=1
+
   audit:
     runs-on: ubuntu-latest
     steps:

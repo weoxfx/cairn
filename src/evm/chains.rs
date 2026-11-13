@@ -4,6 +4,8 @@
 //! and refused if it answers with a different chain, so a bad or malicious
 //! endpoint cannot make this wallet build a transfer for another network.
 
+use crate::error::Result;
+
 use crate::hardening;
 use std::io::Read;
 use std::path::PathBuf;
@@ -178,7 +180,7 @@ pub fn default_chain() -> &'static Chain {
     &CHAINS[0]
 }
 
-pub fn set_default(chain: &Chain) -> Result<(), String> {
+pub fn set_default(chain: &Chain) -> Result<()> {
     let p = config_path().ok_or("HOME not set")?;
     if let Some(dir) = p.parent() {
         hardening::ensure_private_dir(dir)?;

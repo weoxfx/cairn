@@ -2,6 +2,8 @@
 //! of the same user, private default file permissions, plus symlink-safe
 //! helpers for writing the wallet directory and config.
 
+use crate::error::Result;
+
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -61,30 +63,26 @@ pub fn unlock_memory(_ptr: *const u8, _len: usize) {}
 
 /// Create `dir` with mode 0700, or verify that an existing path is a real
 /// directory we can lock down. Symlinks and non-directories are refused.
-pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {
+pub fn ensure_private_dir(dir: &Path) -> Result<()> {
     match fs::symlink_metadata(dir) {
         Ok(m) if m.file_type().is_symlink() => {
-            return Err(format!(
-                "refusing to use symlinked directory {}",
-                dir.display()
-            ))
+            return Err(format!("refusing to use symlinked directory {}", dir.display()).into())
         }
-        Ok(m) if !m.is_dir() => return Err(format!("{} is not a directory", dir.display())),
+        Ok(m) if !m.is_dir() => return Err(format!("{} is not a directory", dir.display()).into()),
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
             let meta = fs::symlink_metadata(dir)
                 .map_err(|e| format!("cannot inspect {}: {e}", dir.display()))?;
             if meta.file_type().is_symlink() || !meta.is_dir() {
-                return Err(format!(
-                    "refusing to use unsafe directory {}",
-                    dir.display()
-                ));
+                return Err(format!("refusing to use unsafe directory {}", dir.display()).into());
             }
         }
-        Err(e) => return Err(format!("cannot inspect {}: {e}", dir.display())),
+        Err(e) => return Err(format!("cannot inspect {}: {e}", dir.display()).into()),
     }
-    set_dir_mode(dir).map_err(|e| format!("cannot secure {}: {e}", dir.display()))
+    set_dir_mode(dir)
+        .map_err(|e| format!("cannot secure {}: {e}", dir.display()))
+        .map_err(crate::error::Error::from)
 }
 
 /// Owner-only permissions on a directory. A no-op where POSIX modes do not exist.
@@ -172,7 +170,7 @@ pub fn restrict(file: &fs::File) -> std::io::Result<()> {
 /// Atomically replace `path` with `data`, mode 0600. The temp file is created
 /// with `O_NOFOLLOW` and the rename replaces any existing symlink instead of
 /// writing through it.
-pub fn write_private(path: &Path, data: &[u8]) -> Result<(), String> {
+pub fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     let dir = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
@@ -184,7 +182,7 @@ pub fn write_private(path: &Path, data: &[u8]) -> Result<(), String> {
         .unwrap_or(0);
     let tmp = dir.join(format!(".{name}.{}.{nanos}.tmp", std::process::id()));
 
-    let result = (|| -> Result<(), String> {
+    let result = (|| -> Result<()> {
         let mut f =
             create_private(&tmp).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
         f.write_all(data).map_err(|e| e.to_string())?;

@@ -39,4 +39,18 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "electrum_reply"
+path = "fuzz_targets/electrum_reply.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "evm_rlp"
+path = "fuzz_targets/evm_rlp.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

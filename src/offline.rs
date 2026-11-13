@@ -5,6 +5,8 @@
 //! `--offline` never touches the network: it verifies the PSBT, shows what is
 //! being spent, asks for `SEND`, then signs with keys derived from the seed.
 
+use crate::error::Result;
+
 use crate::chain;
 use crate::esplora;
 use crate::network;
@@ -32,7 +34,7 @@ fn fee_for(rate: f64, vbytes: u64) -> u64 {
 
 /// Cairn only signs immediate transactions. A non-zero locktime from an
 /// untrusted PSBT could freeze funds until a future height or timestamp.
-fn check_immediate(psbt: &Psbt) -> Result<(), String> {
+fn check_immediate(psbt: &Psbt) -> Result<()> {
     if psbt.unsigned_tx.lock_time != LockTime::ZERO {
         return Err(
             "PSBT has a non-zero locktime; Cairn only signs or broadcasts immediate transactions"
@@ -44,12 +46,12 @@ fn check_immediate(psbt: &Psbt) -> Result<(), String> {
 
 // ---------- online: create the unsigned PSBT ----------
 
-pub fn create_psbt(wallet: Option<String>, out: Option<String>) -> Result<(), String> {
+pub fn create_psbt(wallet: Option<String>, out: Option<String>) -> Result<()> {
     banner();
     section("Create PSBT (online, watch-only)");
     println!();
-    let name = crate::choose_wallet(wallet.as_deref())?;
-    let opened = crate::unlock_wallet(&name)?;
+    let name = crate::cli::choose_wallet(wallet.as_deref())?;
+    let opened = crate::cli::unlock_wallet(&name)?;
     let network = opened.network;
     crate::ui::set_network(network);
     let net = esplora::net_for(network)?;
@@ -147,14 +149,14 @@ pub fn create_psbt(wallet: Option<String>, out: Option<String>) -> Result<(), St
 
 // ---------- offline: verify and sign ----------
 
-pub fn sign_psbt(input: String, out: Option<String>) -> Result<(), String> {
+pub fn sign_psbt(input: String, out: Option<String>) -> Result<()> {
     banner();
     section("Sign PSBT (offline)");
     println!();
     let mut psbt = read_psbt(&input)?;
 
-    let name = crate::choose_wallet(None)?;
-    let opened = crate::unlock_wallet(&name)?;
+    let name = crate::cli::choose_wallet(None)?;
+    let opened = crate::cli::unlock_wallet(&name)?;
     let network = opened.network;
     crate::ui::set_network(network);
     let watch = Watch::from_opened(&opened)?;
@@ -196,7 +198,7 @@ pub fn sign_psbt(input: String, out: Option<String>) -> Result<(), String> {
 
 // ---------- QR transport ----------
 
-pub fn show_qr(path: String) -> Result<(), String> {
+pub fn show_qr(path: String) -> Result<()> {
     let psbt = read_psbt(&path)?;
     if let Ok(network) = psbt_network(&psbt) {
         crate::ui::set_network(network);
@@ -224,7 +226,7 @@ pub fn show_qr(path: String) -> Result<(), String> {
     Ok(())
 }
 
-pub fn scan_qr(images: Vec<String>, out: Option<String>) -> Result<(), String> {
+pub fn scan_qr(images: Vec<String>, out: Option<String>) -> Result<()> {
     banner();
     section("Read PSBT from QR photos");
     println!();
@@ -265,12 +267,7 @@ struct Verified {
 /// The value of each coin comes from the PSBT itself: an offline machine cannot
 /// independently look up UTXOs. Everything else (ownership of the inputs, the
 /// script each key locks, the outputs and the arithmetic) is checked here.
-fn verify_psbt(
-    psbt: &Psbt,
-    watch: &Watch,
-    signer: &Signer,
-    network: Network,
-) -> Result<Verified, String> {
+fn verify_psbt(psbt: &Psbt, watch: &Watch, signer: &Signer, network: Network) -> Result<Verified> {
     // Structure, signedness, previous-transaction consistency and arithmetic
     // are wallet-independent and shared with the fuzzer.
     let (total_in, total_out) = crate::psbt_guard::check_structure(psbt)?;
@@ -299,18 +296,16 @@ fn verify_psbt(
                 parse_account_path(path, network).map_err(|e| format!("input {i}: {e}"))?;
             let expected = ScriptBuf::new_p2tr(&Secp256k1::verification_only(), *xonly, None);
             if expected != utxo.script_pubkey || *xonly != internal {
-                return Err(format!("input {i}: key does not match the coin's script"));
+                return Err(format!("input {i}: key does not match the coin's script").into());
             }
             let (mut derived_sk, derived_pubkey) = signer.key_at(chain, index)?;
             derived_sk.non_secure_erase();
             if XOnlyPublicKey::from(derived_pubkey) != *xonly {
-                return Err(format!("input {i}: key does not match this wallet"));
+                return Err(format!("input {i}: key does not match this wallet").into());
             }
         } else {
             if !utxo.script_pubkey.is_p2wpkh() {
-                return Err(format!(
-                    "input {i} is not a native SegWit or Taproot output"
-                ));
+                return Err(format!("input {i} is not a native SegWit or Taproot output").into());
             }
             let (pubkey, (fp, path)) = input
                 .bip32_derivation
@@ -325,12 +320,12 @@ fn verify_psbt(
             let expected_script =
                 ScriptBuf::new_p2wpkh(&CompressedPublicKey(*pubkey).wpubkey_hash());
             if expected_script != utxo.script_pubkey {
-                return Err(format!("input {i}: key does not match the coin's script"));
+                return Err(format!("input {i}: key does not match the coin's script").into());
             }
             let (mut derived_sk, derived_pubkey) = signer.key_at(chain, index)?;
             derived_sk.non_secure_erase();
             if derived_pubkey != *pubkey {
-                return Err(format!("input {i}: key does not match this wallet"));
+                return Err(format!("input {i}: key does not match this wallet").into());
             }
         }
     }
@@ -362,7 +357,8 @@ fn verify_psbt(
     if fee < vsize_est {
         return Err(format!(
             "fee of {fee} sats is below the 1 sat/vB relay minimum (about {vsize_est} needed)"
-        ));
+        )
+        .into());
     }
 
     Ok(Verified {
@@ -432,7 +428,7 @@ fn show_psbt_review(v: &Verified, network: Network) {
 
 // ---------- online: broadcast the signed PSBT ----------
 
-pub fn broadcast(unsigned_path: String, signed_path: String) -> Result<(), String> {
+pub fn broadcast(unsigned_path: String, signed_path: String) -> Result<()> {
     let unsigned = read_psbt(&unsigned_path)?;
     let network = psbt_network(&unsigned)?;
     crate::ui::set_network(network);
@@ -530,13 +526,13 @@ pub fn broadcast(unsigned_path: String, signed_path: String) -> Result<(), Strin
             pause();
             Ok(())
         }
-        Err(e) if e.starts_with("REJECTED:") => Err(e),
-        Err(e) => Err(format!("Broadcast status unknown: {e}")),
+        Err(e) if e.kind() == crate::error::Kind::Rejected => Err(e),
+        Err(e) => Err(format!("Broadcast status unknown: {e}").into()),
     }
 }
 
 /// The offline machine must not be able to change what the online machine planned.
-fn ensure_same_unsigned(unsigned: &Psbt, signed: &Psbt) -> Result<(), String> {
+fn ensure_same_unsigned(unsigned: &Psbt, signed: &Psbt) -> Result<()> {
     if unsigned.unsigned_tx != signed.unsigned_tx {
         return Err("signed PSBT does not match the unsigned PSBT. Nothing was sent.".into());
     }
@@ -551,7 +547,7 @@ fn ensure_same_unsigned(unsigned: &Psbt, signed: &Psbt) -> Result<(), String> {
             || u.tap_internal_key != s.tap_internal_key
             || u.tap_key_origins != s.tap_key_origins
         {
-            return Err(format!("signed PSBT changed input {i}. Nothing was sent."));
+            return Err(format!("signed PSBT changed input {i}. Nothing was sent.").into());
         }
     }
     Ok(())
@@ -561,7 +557,7 @@ fn ensure_same_unsigned(unsigned: &Psbt, signed: &Psbt) -> Result<(), String> {
 
 /// Infer the chain from the BIP84 coin type in the PSBT key origins. A PSBT that
 /// mixes coin types is rejected rather than guessed.
-fn psbt_network(psbt: &Psbt) -> Result<Network, String> {
+fn psbt_network(psbt: &Psbt) -> Result<Network> {
     let mut found: Option<Network> = None;
     for input in &psbt.inputs {
         for (_, path) in input.bip32_derivation.values() {
@@ -587,10 +583,12 @@ fn psbt_network(psbt: &Psbt) -> Result<Network, String> {
             }
         }
     }
-    found.ok_or_else(|| "cannot determine the network from this PSBT".to_string())
+    found
+        .ok_or_else(|| "cannot determine the network from this PSBT".to_string())
+        .map_err(crate::error::Error::from)
 }
 
-fn our_scripts(watch: &Watch) -> Result<HashSet<ScriptBuf>, String> {
+fn our_scripts(watch: &Watch) -> Result<HashSet<ScriptBuf>> {
     let mut set = HashSet::new();
     // Address scans stop around MAX_INDEX, so look a little past it for change.
     let count = esplora::MAX_INDEX + 16;
@@ -602,27 +600,25 @@ fn our_scripts(watch: &Watch) -> Result<HashSet<ScriptBuf>, String> {
     Ok(set)
 }
 
-fn prompt_recipient(network: Network) -> Result<Address, String> {
+fn prompt_recipient(network: Network) -> Result<Address> {
     let s: String = Input::with_theme(&crate::ui::theme())
         .with_prompt("Recipient address")
-        .validate_with(|s: &String| -> Result<(), String> {
-            send::parse_address(s, network).map(|_| ())
-        })
+        .validate_with(|s: &String| -> Result<()> { send::parse_address(s, network).map(|_| ()) })
         .interact_text()
         .map_err(|e| e.to_string())?;
     send::parse_address(&s, network)
 }
 
-fn prompt_amount() -> Result<Option<u64>, String> {
+fn prompt_amount() -> Result<Option<u64>> {
     let s: String = Input::with_theme(&crate::ui::theme())
         .with_prompt("Amount (e.g. 0.0005, 50000 sats, or max)")
-        .validate_with(|s: &String| -> Result<(), String> { send::parse_amount(s).map(|_| ()) })
+        .validate_with(|s: &String| -> Result<()> { send::parse_amount(s).map(|_| ()) })
         .interact_text()
         .map_err(|e| e.to_string())?;
     send::parse_amount(&s)
 }
 
-fn prompt_rate(rates: Option<esplora::Rates>) -> Result<f64, String> {
+fn prompt_rate(rates: Option<esplora::Rates>) -> Result<f64> {
     match rates {
         Some(r) => {
             let items = [
@@ -652,7 +648,7 @@ fn prompt_rate(rates: Option<esplora::Rates>) -> Result<f64, String> {
         None => Input::with_theme(&crate::ui::theme())
             .with_prompt("Fee rate in sat/vB (estimates unavailable)")
             .default(2.0f64)
-            .validate_with(|v: &f64| -> Result<(), &str> {
+            .validate_with(|v: &f64| -> std::result::Result<(), &str> {
                 if *v >= 1.0 && *v <= network::MAX_FEE_RATE {
                     Ok(())
                 } else {
@@ -660,11 +656,12 @@ fn prompt_rate(rates: Option<esplora::Rates>) -> Result<f64, String> {
                 }
             })
             .interact_text()
-            .map_err(|e| e.to_string()),
+            .map_err(|e| e.to_string())
+            .map_err(crate::error::Error::from),
     }
 }
 
-fn confirm(prompt: &str, word: &str) -> Result<bool, String> {
+fn confirm(prompt: &str, word: &str) -> Result<bool> {
     let answer: String = Input::with_theme(&crate::ui::theme())
         .with_prompt(prompt)
         .allow_empty(true)
@@ -673,7 +670,7 @@ fn confirm(prompt: &str, word: &str) -> Result<bool, String> {
     Ok(answer.trim() == word)
 }
 
-fn read_psbt(path: &str) -> Result<Psbt, String> {
+fn read_psbt(path: &str) -> Result<Psbt> {
     let file = crate::hardening::open_read(std::path::Path::new(path))
         .map_err(|e| format!("cannot read {path}: {e}"))?;
     if !file
@@ -681,16 +678,16 @@ fn read_psbt(path: &str) -> Result<Psbt, String> {
         .map_err(|e| format!("cannot read {path}: {e}"))?
         .is_file()
     {
-        return Err(format!("{path} is not a regular file"));
+        return Err(format!("{path} is not a regular file").into());
     }
     let mut data = Vec::new();
     file.take(MAX_PSBT_BYTES + 1)
         .read_to_end(&mut data)
         .map_err(|e| format!("cannot read {path}: {e}"))?;
     if data.len() as u64 > MAX_PSBT_BYTES {
-        return Err(format!(
-            "{path} is too large (max {MAX_PSBT_BYTES} bytes); refusing to load"
-        ));
+        return Err(
+            format!("{path} is too large (max {MAX_PSBT_BYTES} bytes); refusing to load").into(),
+        );
     }
     if let Ok(psbt) = Psbt::deserialize(&data) {
         return Ok(psbt);
@@ -698,10 +695,12 @@ fn read_psbt(path: &str) -> Result<Psbt, String> {
     let text = std::str::from_utf8(&data).map_err(|_| format!("{path} is not a PSBT"))?;
     let bytes = hex::decode(text.trim())
         .map_err(|_| format!("{path} is not a PSBT (binary or hex expected)"))?;
-    Psbt::deserialize(&bytes).map_err(|e| format!("invalid PSBT in {path}: {e}"))
+    Psbt::deserialize(&bytes)
+        .map_err(|e| format!("invalid PSBT in {path}: {e}"))
+        .map_err(crate::error::Error::from)
 }
 
-fn write_psbt(path: &str, psbt: &Psbt) -> Result<(), String> {
+fn write_psbt(path: &str, psbt: &Psbt) -> Result<()> {
     crate::hardening::write_private(Path::new(path), &psbt.serialize())
 }
 

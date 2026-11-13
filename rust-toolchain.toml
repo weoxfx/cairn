@@ -1,0 +1,7 @@
+# Pinned so a local build uses the same compiler CI and the release workflow use.
+# This file, not the workflow YAML, is the source of truth for the toolchain that
+# REPRODUCIBLE.md promises.
+[toolchain]
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

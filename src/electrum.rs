@@ -13,6 +13,8 @@
 //! `host:port`). TLS is used unless the address starts with `tcp://`, which is
 //! only sensible for a local node.
 
+use crate::error::Result;
+
 use crate::esplora::{Net, Rates, Utxo, WalletState, MAX_INDEX};
 use crate::network;
 use crate::wallet::Watch;
@@ -52,7 +54,7 @@ fn genesis_hash(network: Network) -> &'static str {
     }
 }
 
-fn check_genesis(network: Network, reported: &str) -> Result<(), String> {
+fn check_genesis(network: Network, reported: &str) -> Result<()> {
     let want = genesis_hash(network);
     if want.is_empty() {
         return Err("this chain has no known genesis hash".into());
@@ -61,7 +63,8 @@ fn check_genesis(network: Network, reported: &str) -> Result<(), String> {
         return Err(format!(
             "refusing server: it is on another chain (genesis {}…)",
             reported.chars().take(12).collect::<String>()
-        ));
+        )
+        .into());
     }
     Ok(())
 }
@@ -77,7 +80,7 @@ pub fn selected() -> bool {
 }
 
 /// Server for this chain: `CAIRN_ELECTRUM` wins, then a public default.
-pub fn server_for(network: Network) -> Result<String, String> {
+pub fn server_for(network: Network) -> Result<String> {
     if let Ok(s) = std::env::var("CAIRN_ELECTRUM") {
         let s = s.trim().to_string();
         if !s.is_empty() {
@@ -128,7 +131,7 @@ pub struct Client {
 }
 
 /// Split `host:port` (optionally `tcp://`), rejecting anything odd.
-fn split_server(spec: &str) -> Result<(String, u16, bool), String> {
+fn split_server(spec: &str) -> Result<(String, u16, bool)> {
     let (spec, tls) = match spec.strip_prefix("tcp://") {
         Some(rest) => (rest, false),
         None => (spec, true),
@@ -147,7 +150,7 @@ fn split_server(spec: &str) -> Result<(String, u16, bool), String> {
 }
 
 impl Client {
-    pub fn connect(spec: &str, network: Network) -> Result<Self, String> {
+    pub fn connect(spec: &str, network: Network) -> Result<Self> {
         let (host, port, tls) = split_server(spec)?;
         let addr = (host.as_str(), port)
             .to_socket_addrs()
@@ -199,7 +202,7 @@ impl Client {
         Ok(client)
     }
 
-    fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+    fn request(&mut self, method: &str, params: Value) -> Result<Value> {
         self.id += 1;
         let id = self.id;
         let line = serde_json::to_string(&json!({
@@ -225,14 +228,14 @@ impl Client {
                 .read_line(&mut buf)
                 .map_err(|e| format!("{method} failed: {e}"))?;
             if n == 0 {
-                return Err(format!("{method}: server closed the connection"));
+                return Err(format!("{method}: server closed the connection").into());
             }
             if buf.len() as u64 > MAX_LINE {
-                return Err(format!("{method}: server reply is too large"));
+                return Err(format!("{method}: server reply is too large").into());
             }
             let reply: Value = match serde_json::from_str(&buf) {
                 Ok(v) => v,
-                Err(_) => return Err(format!("{method}: server sent malformed JSON")),
+                Err(_) => return Err(format!("{method}: server sent malformed JSON").into()),
             };
             // Notifications (no id) are ignored; only our own reply is returned.
             if reply["id"].as_u64() != Some(id) {
@@ -240,29 +243,29 @@ impl Client {
             }
             if !reply["error"].is_null() {
                 let msg = reply["error"]["message"].as_str().unwrap_or("server error");
-                return Err(safe_text(msg));
+                return Err(crate::error::Error::rejected(safe_text(msg)));
             }
             return Ok(reply["result"].clone());
         }
     }
 
-    pub fn history(&mut self, scripthash: &str) -> Result<Vec<(String, i64)>, String> {
+    pub fn history(&mut self, scripthash: &str) -> Result<Vec<(String, i64)>> {
         let v = self.request("blockchain.scripthash.get_history", json!([scripthash]))?;
         parse_history(&v)
     }
 
-    pub fn list_unspent(&mut self, scripthash: &str) -> Result<Vec<Unspent>, String> {
+    pub fn list_unspent(&mut self, scripthash: &str) -> Result<Vec<Unspent>> {
         let v = self.request("blockchain.scripthash.listunspent", json!([scripthash]))?;
         parse_unspent(&v)
     }
 
-    pub fn estimate_fee(&mut self, blocks: u32) -> Result<f64, String> {
+    pub fn estimate_fee(&mut self, blocks: u32) -> Result<f64> {
         let v = self.request("blockchain.estimatefee", json!([blocks]))?;
         let btc_per_kb = v.as_f64().unwrap_or(-1.0);
         Ok(btc_per_kb_to_sat_vb(btc_per_kb))
     }
 
-    pub fn broadcast(&mut self, hex: &str) -> Result<String, String> {
+    pub fn broadcast(&mut self, hex: &str) -> Result<String> {
         let v = self.request("blockchain.transaction.broadcast", json!([hex]))?;
         let txid = v
             .as_str()
@@ -272,7 +275,7 @@ impl Client {
         Ok(txid.to_string())
     }
 
-    pub fn raw_tx(&mut self, txid: &str) -> Result<Transaction, String> {
+    pub fn raw_tx(&mut self, txid: &str) -> Result<Transaction> {
         let v = self.request("blockchain.transaction.get", json!([txid, false]))?;
         let hex = v
             .as_str()
@@ -282,7 +285,7 @@ impl Client {
         }
         let bytes = hex::decode(hex).map_err(|_| "server returned invalid hex".to_string())?;
         bitcoin::consensus::encode::deserialize(&bytes)
-            .map_err(|_| "server returned an unparseable transaction".to_string())
+            .map_err(|_| crate::error::Error::network("server returned an unparseable transaction"))
     }
 }
 
@@ -317,7 +320,7 @@ fn safe_text(s: &str) -> String {
         .collect()
 }
 
-fn parse_history(v: &Value) -> Result<Vec<(String, i64)>, String> {
+fn parse_history(v: &Value) -> Result<Vec<(String, i64)>> {
     let items = v.as_array().ok_or("history is not a list")?;
     if items.len() > 100_000 {
         return Err("server returned an impossibly long history".into());
@@ -334,7 +337,7 @@ fn parse_history(v: &Value) -> Result<Vec<(String, i64)>, String> {
     Ok(out)
 }
 
-fn parse_unspent(v: &Value) -> Result<Vec<Unspent>, String> {
+fn parse_unspent(v: &Value) -> Result<Vec<Unspent>> {
     let items = v.as_array().ok_or("unspent list is not a list")?;
     if items.len() > 5000 {
         return Err("server returned too many unspent outputs".into());
@@ -364,7 +367,7 @@ fn parse_unspent(v: &Value) -> Result<Vec<Unspent>, String> {
 
 // ---------------- wallet operations ----------------
 
-fn open(net: Net) -> Result<Client, String> {
+fn open(net: Net) -> Result<Client> {
     let network = network_of(net);
     Client::connect(&server_for(network)?, network)
 }
@@ -383,7 +386,7 @@ fn scan_chain(
     chain: u32,
     gap_limit: u32,
     min_index: u32,
-) -> Result<ChainScan, String> {
+) -> Result<ChainScan> {
     let mut res = ChainScan::default();
     let (mut gap, mut idx) = (0u32, 0u32);
     while (gap < gap_limit || idx < min_index) && idx < MAX_INDEX {
@@ -423,11 +426,7 @@ fn scan_chain(
 }
 
 /// Same shape and semantics as the HTTP backend's sync.
-pub fn sync(
-    watch: &Watch,
-    gap_limit: u32,
-    prev: Option<&WalletState>,
-) -> Result<WalletState, String> {
+pub fn sync(watch: &Watch, gap_limit: u32, prev: Option<&WalletState>) -> Result<WalletState> {
     let (min_r, min_c) = prev
         .map(|p| (p.next_receive, p.next_change))
         .unwrap_or((0, 0));
@@ -453,7 +452,7 @@ pub fn sync(
     })
 }
 
-pub fn utxos_for(net: Net, addrs: &[String]) -> Result<Vec<Utxo>, String> {
+pub fn utxos_for(net: Net, addrs: &[String]) -> Result<Vec<Utxo>> {
     let mut client = open(net)?;
     let mut out = vec![];
     for addr in addrs {
@@ -470,7 +469,7 @@ pub fn utxos_for(net: Net, addrs: &[String]) -> Result<Vec<Utxo>, String> {
     Ok(out)
 }
 
-pub fn fee_rates(net: Net) -> Result<Rates, String> {
+pub fn fee_rates(net: Net) -> Result<Rates> {
     let mut client = open(net)?;
     Ok(Rates {
         slow: client.estimate_fee(12)?,
@@ -479,14 +478,14 @@ pub fn fee_rates(net: Net) -> Result<Rates, String> {
     })
 }
 
-pub fn broadcast(net: Net, hex: &str) -> Result<String, String> {
+pub fn broadcast(net: Net, hex: &str) -> Result<String> {
     let mut client = open(net)?;
     client.broadcast(hex)
 }
 
 /// Re-fetch each spent coin's creating transaction and compare value and script,
 /// exactly as the HTTP backend does.
-pub fn verify_prevouts(net: Net, utxos: &[Utxo]) -> Result<(), String> {
+pub fn verify_prevouts(net: Net, utxos: &[Utxo]) -> Result<()> {
     if utxos.is_empty() {
         return Ok(());
     }
@@ -514,14 +513,30 @@ pub fn verify_prevouts(net: Net, utxos: &[Utxo]) -> Result<(), String> {
             .get(u.vout as usize)
             .ok_or("server transaction has no such output")?;
         if out.value.to_sat() != u.value {
-            return Err(format!("coin {key}:{} value does not match", u.vout));
+            return Err(format!("coin {key}:{} value does not match", u.vout).into());
         }
         let spk = crate::send::script_of(&u.address)?;
         if out.script_pubkey != spk {
-            return Err(format!("coin {key}:{} is not this address", u.vout));
+            return Err(format!("coin {key}:{} is not this address", u.vout).into());
         }
     }
     Ok(())
+}
+
+/// Fuzz entry point: a hostile Electrum server's reply, as JSON.
+///
+/// History and unspent lists are the largest server-controlled structures in the
+/// protocol, and both are parsed field by field even when the types are wrong.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_reply(data: &[u8]) {
+    let Ok(text) = std::str::from_utf8(data) else {
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return;
+    };
+    let _ = parse_history(&value);
+    let _ = parse_unspent(&value);
 }
 
 #[cfg(test)]

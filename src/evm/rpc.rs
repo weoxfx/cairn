@@ -6,10 +6,12 @@
 //! so a node that answers with the wrong chain can never be used to build a
 //! transaction for this wallet.
 
+use crate::error::Result;
+
 use crate::evm::chains::Chain;
+use crate::http;
 use primitive_types::U256;
 use serde_json::{json, Value};
-use std::io::Read;
 use std::time::Duration;
 
 const MAX_BODY: u64 = 4_000_000;
@@ -24,10 +26,10 @@ pub struct Rpc {
 impl Rpc {
     /// Connect and verify. Fails closed: if no endpoint reports the expected
     /// chain id, no transaction can be built or broadcast.
-    pub fn connect(chain: &'static Chain) -> Result<Self, String> {
+    pub fn connect(chain: &'static Chain) -> Result<Self> {
         let endpoints = endpoints_for(chain);
         if endpoints.is_empty() {
-            return Err(format!("no RPC endpoints configured for {}", chain.name));
+            return Err(format!("no RPC endpoints configured for {}", chain.name).into());
         }
         let rpc = Rpc {
             chain,
@@ -37,7 +39,7 @@ impl Rpc {
         rpc.verified()
     }
 
-    fn verified(mut self) -> Result<Self, String> {
+    fn verified(mut self) -> Result<Self> {
         let mut good = Vec::new();
         let mut problems = Vec::new();
         for ep in &self.endpoints {
@@ -56,7 +58,8 @@ impl Rpc {
                 "no usable {} RPC endpoint ({})",
                 self.chain.name,
                 problems.join("; ")
-            ));
+            )
+            .into());
         }
         self.endpoints = good;
         Ok(self)
@@ -67,7 +70,7 @@ impl Rpc {
         self.chain
     }
 
-    pub fn call(&self, method: &str, params: Value) -> Result<Value, String> {
+    pub fn call(&self, method: &str, params: Value) -> Result<Value> {
         let body = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -77,7 +80,7 @@ impl Rpc {
         .to_string();
         let mut last = format!("no {} RPC endpoint answered", self.chain.name);
         for ep in &self.endpoints {
-            match post_json(&self.agent, ep, &body) {
+            match http::post_json(&self.agent, ep, &body, "RPC", MAX_BODY) {
                 Ok(v) => {
                     if let Some(err) = v.get("error") {
                         let msg = err
@@ -85,22 +88,23 @@ impl Rpc {
                             .and_then(|m| m.as_str())
                             .unwrap_or("RPC returned an error");
                         let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
-                        return Err(safe_text(&format!("{msg} (code {code})"), 300));
+                        return Err(safe_text(&format!("{msg} (code {code})"), 300).into());
                     }
                     return v
                         .get("result")
                         .cloned()
-                        .ok_or_else(|| "RPC response has no result".to_string());
+                        .ok_or_else(|| "RPC response has no result".to_string())
+                        .map_err(crate::error::Error::from);
                 }
                 // Transport failures fail over; a JSON-RPC error does not.
                 Err(e) => last = format!("{}: {e}", host_of(ep)),
             }
         }
-        Err(last)
+        Err(last.into())
     }
 
     #[cfg(test)]
-    pub fn block_number(&self) -> Result<u64, String> {
+    pub fn block_number(&self) -> Result<u64> {
         let v = self.call("eth_blockNumber", json!([]))?;
         let n = quantity(&v)?;
         if n > U256::from(u64::MAX) {
@@ -109,12 +113,12 @@ impl Rpc {
         Ok(n.low_u64())
     }
 
-    pub fn balance(&self, address: &[u8; 20]) -> Result<U256, String> {
+    pub fn balance(&self, address: &[u8; 20]) -> Result<U256> {
         let v = self.call("eth_getBalance", json!([hex_address(address), "latest"]))?;
         quantity(&v)
     }
 
-    pub fn nonce(&self, address: &[u8; 20]) -> Result<u64, String> {
+    pub fn nonce(&self, address: &[u8; 20]) -> Result<u64> {
         let v = self.call(
             "eth_getTransactionCount",
             json!([hex_address(address), "pending"]),
@@ -126,7 +130,7 @@ impl Rpc {
         Ok(n.low_u64())
     }
 
-    pub fn base_fee(&self) -> Result<Option<U256>, String> {
+    pub fn base_fee(&self) -> Result<Option<U256>> {
         let v = self.call("eth_getBlockByNumber", json!(["latest", false]))?;
         match v.get("baseFeePerGas") {
             Some(x) if !x.is_null() => Ok(Some(quantity(x)?)),
@@ -134,7 +138,7 @@ impl Rpc {
         }
     }
 
-    pub fn gas_price(&self) -> Result<U256, String> {
+    pub fn gas_price(&self) -> Result<U256> {
         let v = self.call("eth_gasPrice", json!([]))?;
         quantity(&v)
     }
@@ -152,7 +156,7 @@ impl Rpc {
         to: &[u8; 20],
         value: U256,
         data: &[u8],
-    ) -> Result<U256, String> {
+    ) -> Result<U256> {
         let mut obj = json!({"from": hex_address(from), "to": hex_address(to)});
         if !value.is_zero() {
             obj["value"] = json!(to_quantity(value));
@@ -164,7 +168,7 @@ impl Rpc {
         quantity(&v)
     }
 
-    pub fn eth_call(&self, to: &[u8; 20], data: &[u8]) -> Result<Vec<u8>, String> {
+    pub fn eth_call(&self, to: &[u8; 20], data: &[u8]) -> Result<Vec<u8>> {
         let v = self.call(
             "eth_call",
             json!([{"to": hex_address(to), "data": format!("0x{}", hex::encode(data))}, "latest"]),
@@ -174,10 +178,12 @@ impl Rpc {
         if body.len() > 2 * 4096 {
             return Err("contract returned too much data".into());
         }
-        hex::decode(body).map_err(|_| "contract returned invalid hex".to_string())
+        hex::decode(body)
+            .map_err(|_| "contract returned invalid hex".to_string())
+            .map_err(crate::error::Error::from)
     }
 
-    pub fn send_raw(&self, raw: &[u8]) -> Result<String, String> {
+    pub fn send_raw(&self, raw: &[u8]) -> Result<String> {
         let v = self.call(
             "eth_sendRawTransaction",
             json!([format!("0x{}", hex::encode(raw))]),
@@ -205,58 +211,13 @@ fn endpoints_for(chain: &Chain) -> Vec<String> {
     chain.rpc.iter().map(|s| s.to_string()).collect()
 }
 
-fn agent() -> Result<ureq::Agent, String> {
-    let mut builder = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(10))
-        .timeout_read(TIMEOUT)
-        .timeout(TIMEOUT)
-        .user_agent(concat!(
-            "cairn/",
-            env!("CARGO_PKG_VERSION"),
-            " (evm wallet)"
-        ))
-        .https_only(true)
-        .redirects(0)
-        .max_idle_connections(0);
-    if let Some(p) = proxy_setting() {
-        let proxy = ureq::Proxy::new(&p)
-            .map_err(|e| format!("invalid CAIRN_PROXY/CAIRN_TOR setting: {e}"))?;
-        builder = builder.proxy(proxy);
-    }
-    Ok(builder.build())
+fn agent() -> Result<ureq::Agent> {
+    http::agent("evm wallet", Duration::from_secs(10), TIMEOUT, TIMEOUT)
 }
 
-fn proxy_setting() -> Option<String> {
-    if let Ok(v) = std::env::var("CAIRN_PROXY") {
-        let v = v.trim();
-        if !v.is_empty() {
-            return Some(v.to_string());
-        }
-    }
-    match std::env::var("CAIRN_TOR").ok().as_deref() {
-        Some("1") | Some("true") | Some("yes") => Some("socks5://127.0.0.1:9050".into()),
-        _ => None,
-    }
-}
-
-fn post_json(agent: &ureq::Agent, url: &str, body: &str) -> Result<Value, String> {
-    let resp = agent
-        .post(url)
-        .set("content-type", "application/json")
-        .send_string(body);
-    match resp {
-        Ok(r) => {
-            let text = read_body(r)?;
-            serde_json::from_str(&text).map_err(|_| "RPC returned invalid JSON".to_string())
-        }
-        Err(ureq::Error::Status(code, _)) => Err(format!("HTTP {code}")),
-        Err(e) => Err(format!("network error: {e}")),
-    }
-}
-
-fn chain_id_at(agent: &ureq::Agent, url: &str) -> Result<u64, String> {
+fn chain_id_at(agent: &ureq::Agent, url: &str) -> Result<u64> {
     let body = json!({"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}).to_string();
-    let v = post_json(agent, url, &body)?;
+    let v = http::post_json(agent, url, &body, "RPC", MAX_BODY)?;
     let result = v.get("result").ok_or("no result")?;
     let id = quantity(result)?;
     if id > U256::from(u64::MAX) {
@@ -265,25 +226,10 @@ fn chain_id_at(agent: &ureq::Agent, url: &str) -> Result<u64, String> {
     Ok(id.low_u64())
 }
 
-fn read_body(resp: ureq::Response) -> Result<String, String> {
-    let mut body = String::new();
-    resp.into_reader()
-        .take(MAX_BODY + 1)
-        .read_to_string(&mut body)
-        .map_err(|e| format!("read error: {e}"))?;
-    if body.len() as u64 > MAX_BODY {
-        return Err("RPC response exceeds the size limit".into());
-    }
-    Ok(body)
-}
-
 /// Allowlist of printable ASCII so node-supplied text cannot carry terminal
 /// escapes or bidi controls into the UI.
 fn safe_text(s: &str, max: usize) -> String {
-    s.chars()
-        .filter(|c| c.is_ascii_graphic() || *c == ' ')
-        .take(max)
-        .collect()
+    http::safe_text(s, max)
 }
 
 pub fn host_of(url: &str) -> &str {
@@ -300,7 +246,7 @@ pub fn hex_address(a: &[u8; 20]) -> String {
 }
 
 /// Parse a JSON-RPC quantity (`"0x1"`) or a plain JSON number.
-pub fn quantity(v: &Value) -> Result<U256, String> {
+pub fn quantity(v: &Value) -> Result<U256> {
     if let Some(n) = v.as_u64() {
         return Ok(U256::from(n));
     }

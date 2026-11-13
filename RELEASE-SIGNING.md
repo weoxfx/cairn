@@ -26,6 +26,12 @@ The public key (`cairn.pub`) is a short base64 string. Publish it in the README 
 in the release notes, and give it to users out of band when possible. Users pass it
 to the installer as `CAIRN_MINISIGN_PUBKEY`.
 
+Paste it into the `default_pubkey` variable at the top of `install.sh` as well, so the
+default install path verifies the signed manifest without the user having to copy the
+key by hand. Until that variable is filled in, `install.sh` refuses a release that
+publishes a signature but no pinned key, rather than treating an unauthenticated
+download as if it had been verified.
+
 ## Publishing a signed release
 
 The `publish` job in `.github/workflows/release.yml` reads

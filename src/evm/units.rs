@@ -4,6 +4,8 @@
 //! Everything is exact: amounts are parsed into wei-like integers and only
 //! become floating point at the very edge, for a display-only USD estimate.
 
+use crate::error::Result;
+
 use primitive_types::U256;
 
 /// Token decimals are a `uint8` on-chain; 36 is the widest a decimal string
@@ -21,9 +23,9 @@ pub fn pow10(decimals: u32) -> U256 {
 /// `"1.5"`, 18 -> `1500000000000000000`. Rejects signs, exponents, empty
 /// input and more fractional digits than the token has (no silent rounding: a
 /// user who types 0.0000001 USDC should be told, not rounded to zero).
-pub fn parse_units(input: &str, decimals: u32) -> Result<U256, String> {
+pub fn parse_units(input: &str, decimals: u32) -> Result<U256> {
     if decimals > MAX_DECIMALS {
-        return Err(format!("unsupported decimals value {decimals}"));
+        return Err(format!("unsupported decimals value {decimals}").into());
     }
     let s = input.trim();
     if s.is_empty() {
@@ -39,10 +41,10 @@ pub fn parse_units(input: &str, decimals: u32) -> Result<U256, String> {
         return Err("amount is empty".into());
     }
     if !whole.chars().all(|c| c.is_ascii_digit()) || !frac.chars().all(|c| c.is_ascii_digit()) {
-        return Err(format!("'{s}' is not a plain decimal amount"));
+        return Err(format!("'{s}' is not a plain decimal amount").into());
     }
     if frac.len() as u32 > decimals {
-        return Err(format!("at most {decimals} decimal places are allowed"));
+        return Err(format!("at most {decimals} decimal places are allowed").into());
     }
     let whole_v = if whole.is_empty() {
         U256::zero()
@@ -62,6 +64,7 @@ pub fn parse_units(input: &str, decimals: u32) -> Result<U256, String> {
         .checked_mul(pow10(decimals))
         .and_then(|v| v.checked_add(frac_v))
         .ok_or_else(|| "amount is too large".to_string())
+        .map_err(crate::error::Error::from)
 }
 
 /// Exact decimal rendering with trailing zeros trimmed: `1500000000000000000`

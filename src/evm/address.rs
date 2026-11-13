@@ -7,6 +7,8 @@
 //! As with the Bitcoin wallet, after unlocking only the account xpub is kept:
 //! the watch view derives addresses, the signer is built separately and erased.
 
+use crate::error::Result;
+
 use crate::hardening;
 use crate::keystore;
 use bip39::Mnemonic;
@@ -68,17 +70,14 @@ pub fn checksum(addr: &[u8; 20]) -> String {
 /// Parse a 20-byte address. A mixed-case value must match its EIP-55
 /// checksum; all-lowercase and all-uppercase hex are accepted as unchecksummed
 /// input, which is what every wallet and block explorer emits for pastes.
-pub fn parse_address(s: &str) -> Result<[u8; 20], String> {
+pub fn parse_address(s: &str) -> Result<[u8; 20]> {
     let s = s.trim();
     let hexpart = s
         .strip_prefix("0x")
         .or_else(|| s.strip_prefix("0X"))
         .unwrap_or(s);
     if hexpart.len() != 40 {
-        return Err(format!(
-            "address must be 40 hex characters (got {})",
-            hexpart.len()
-        ));
+        return Err(format!("address must be 40 hex characters (got {})", hexpart.len()).into());
     }
     if !hexpart.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("address contains a non-hex character".into());
@@ -114,10 +113,7 @@ pub struct EvmWatch {
 }
 
 impl EvmWatch {
-    pub fn from_mnemonic_with_passphrase(
-        mnemonic: &Mnemonic,
-        passphrase: &str,
-    ) -> Result<Self, String> {
+    pub fn from_mnemonic_with_passphrase(mnemonic: &Mnemonic, passphrase: &str) -> Result<Self> {
         let secp = Secp256k1::new();
         let seed = Zeroizing::new(mnemonic.to_seed(passphrase));
         let mut master =
@@ -131,7 +127,7 @@ impl EvmWatch {
         Ok(EvmWatch { xpub })
     }
 
-    pub fn from_opened(opened: &keystore::Opened) -> Result<Self, String> {
+    pub fn from_opened(opened: &keystore::Opened) -> Result<Self> {
         Self::from_mnemonic_with_passphrase(&opened.mnemonic, &opened.passphrase)
     }
 
@@ -139,7 +135,7 @@ impl EvmWatch {
         self.xpub.to_string()
     }
 
-    pub fn address_at(&self, index: u32) -> Result<[u8; 20], String> {
+    pub fn address_at(&self, index: u32) -> Result<[u8; 20]> {
         let secp = Secp256k1::new();
         let e = |x: bitcoin::bip32::Error| x.to_string();
         let chain = self
@@ -155,7 +151,7 @@ impl EvmWatch {
         Ok(address_from_public_key(&child.public_key))
     }
 
-    pub fn address_string(&self, index: u32) -> Result<String, String> {
+    pub fn address_string(&self, index: u32) -> Result<String> {
         Ok(checksum(&self.address_at(index)?))
     }
 }
@@ -173,7 +169,7 @@ pub struct EvmSigner {
 impl EvmSigner {
     /// The only way to obtain EVM signing keys: from an authenticated keystore
     /// value, so the passphrase is the one the wallet was unlocked with.
-    pub fn from_opened(opened: &keystore::Opened) -> Result<Self, String> {
+    pub fn from_opened(opened: &keystore::Opened) -> Result<Self> {
         let secp = Secp256k1::new();
         let seed = Zeroizing::new(opened.mnemonic.to_seed(opened.passphrase.as_str()));
         let mut master =
@@ -183,7 +179,7 @@ impl EvmSigner {
             Ok(a) => a,
             Err(e) => {
                 master.private_key.non_secure_erase();
-                return Err(e.to_string());
+                return Err(e.to_string().into());
             }
         };
         let inner = Box::new(SignerInner { master, account });
@@ -194,7 +190,7 @@ impl EvmSigner {
         Ok(EvmSigner { inner })
     }
 
-    pub fn key_at(&self, index: u32) -> Result<SecretKey, String> {
+    pub fn key_at(&self, index: u32) -> Result<SecretKey> {
         let secp = Secp256k1::new();
         let e = |x: bitcoin::bip32::Error| x.to_string();
         let path = [
@@ -205,10 +201,10 @@ impl EvmSigner {
         let key =
             SecretKey::from_slice(&child.private_key.secret_bytes()).map_err(|e| e.to_string());
         child.private_key.non_secure_erase();
-        key
+        key.map_err(crate::error::Error::from)
     }
 
-    pub fn address_at(&self, index: u32) -> Result<[u8; 20], String> {
+    pub fn address_at(&self, index: u32) -> Result<[u8; 20]> {
         let key = self.key_at(index)?;
         Ok(address_from_public_key(&key.public_key(&Secp256k1::new())))
     }

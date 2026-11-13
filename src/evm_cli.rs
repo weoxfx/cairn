@@ -5,6 +5,9 @@
 //! introduced. The screens use the same banner, sections, tables and menus as
 //! the Bitcoin side, so the whole product reads as one wallet.
 
+use crate::error::Result;
+
+use crate::cli::{choose_wallet, unlock_wallet};
 use crate::evm::abi;
 use crate::evm::address::{self, EvmSigner, EvmWatch};
 use crate::evm::chains::{self, Chain};
@@ -12,7 +15,7 @@ use crate::evm::price;
 use crate::evm::rpc::Rpc;
 use crate::evm::tx::{self, SignedTx, TokenInfo, UnsignedTx};
 use crate::evm::units;
-use crate::{choose_wallet, ui, unlock_wallet};
+use crate::ui;
 use console::style;
 use primitive_types::U256;
 use serde::{Deserialize, Serialize};
@@ -24,7 +27,7 @@ use std::time::{Duration, Instant};
 const MAX_FILE: u64 = 256 * 1024;
 const IDLE_LOCK: Duration = Duration::from_secs(300);
 
-pub fn run(args: &[String], json: bool) -> Result<(), String> {
+pub fn run(args: &[String], json: bool) -> Result<()> {
     // `--json` is consumed at the top level; drop any that reached us so it is
     // never mistaken for a subcommand.
     let args: Vec<String> = args.iter().filter(|a| *a != "--json").cloned().collect();
@@ -45,13 +48,11 @@ pub fn run(args: &[String], json: bool) -> Result<(), String> {
         "broadcast" => broadcast_cmd(rest, json),
         "token" => token_cmd(rest, json),
         "help" | "-h" | "--help" => usage(),
-        other => Err(format!(
-            "unknown evm command '{other}' (try: cairn evm help)"
-        )),
+        other => Err(format!("unknown evm command '{other}' (try: cairn evm help)").into()),
     }
 }
 
-fn usage() -> Result<(), String> {
+fn usage() -> Result<()> {
     println!(
         "\
 Cairn EVM — one seed, many chains
@@ -102,7 +103,7 @@ fn header(crumb: &str, chain: &Chain) {
     );
 }
 
-fn print_qr(text: &str) -> Result<(), String> {
+fn print_qr(text: &str) -> Result<()> {
     let code = qrcode::QrCode::new(text.as_bytes()).map_err(|e| e.to_string())?;
     let art = code
         .render::<qrcode::render::unicode::Dense1x2>()
@@ -135,20 +136,22 @@ struct Opts {
     json: bool,
 }
 
-fn value(args: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
+fn value(args: &[String], i: &mut usize, flag: &str) -> Result<String> {
     *i += 1;
     args.get(*i)
         .cloned()
         .ok_or_else(|| format!("{flag} needs a value"))
+        .map_err(crate::error::Error::from)
 }
 
-fn parse_number(s: &str, flag: &str) -> Result<u32, String> {
+fn parse_number(s: &str, flag: &str) -> Result<u32> {
     s.trim()
         .parse::<u32>()
         .map_err(|_| format!("{flag} must be a whole number"))
+        .map_err(crate::error::Error::from)
 }
 
-fn parse_opts(args: &[String], json: bool) -> Result<Opts, String> {
+fn parse_opts(args: &[String], json: bool) -> Result<Opts> {
     let mut o = Opts {
         json,
         ..Opts::default()
@@ -172,7 +175,7 @@ fn parse_opts(args: &[String], json: bool) -> Result<Opts, String> {
             "--yes" | "-y" => o.yes = true,
             "--force-fee" => o.force_fee = true,
             "--json" => o.json = true,
-            s if s.starts_with('-') => return Err(format!("unknown option '{s}'")),
+            s if s.starts_with('-') => return Err(format!("unknown option '{s}'").into()),
             s => o.pos.push(s.to_string()),
         }
         i += 1;
@@ -180,36 +183,39 @@ fn parse_opts(args: &[String], json: bool) -> Result<Opts, String> {
     Ok(o)
 }
 
-fn parse_gwei(s: &str, flag: &str) -> Result<f64, String> {
+fn parse_gwei(s: &str, flag: &str) -> Result<f64> {
     let v: f64 = s
         .trim()
         .parse()
         .map_err(|_| format!("{flag} must be a number"))?;
     if !v.is_finite() || v <= 0.0 || v > 1_000_000.0 {
-        return Err(format!("{flag} must be between 0 and 1000000 gwei"));
+        return Err(format!("{flag} must be between 0 and 1000000 gwei").into());
     }
     Ok(v)
 }
 
-fn gwei_value(g: f64) -> Result<U256, String> {
+fn gwei_value(g: f64) -> Result<U256> {
     if !g.is_finite() || g <= 0.0 || g > 1_000_000.0 {
         return Err("fee must be a positive number of gwei".into());
     }
     let s = format!("{g}");
-    units::parse_units(&s, 9).map_err(|_| "fee has more than 9 decimal places".to_string())
+    units::parse_units(&s, 9)
+        .map_err(|_| "fee has more than 9 decimal places".to_string())
+        .map_err(crate::error::Error::from)
 }
 
-fn chain_for(opt: &Option<String>) -> Result<&'static Chain, String> {
+fn chain_for(opt: &Option<String>) -> Result<&'static Chain> {
     match opt {
         Some(s) => chains::by_key_or_id(s)
-            .ok_or_else(|| format!("unknown chain '{s}' (try: cairn evm chains)")),
+            .ok_or_else(|| format!("unknown chain '{s}' (try: cairn evm chains)"))
+            .map_err(crate::error::Error::from),
         None => Ok(chains::default_chain()),
     }
 }
 
 /// `--json` output must stay parseable, so it never falls back to the
 /// interactive wallet picker.
-fn pick_wallet(name: Option<&String>, json: bool) -> Result<String, String> {
+fn pick_wallet(name: Option<&String>, json: bool) -> Result<String> {
     if json && name.is_none() {
         return Err("wallet name is required with --json".into());
     }
@@ -218,7 +224,7 @@ fn pick_wallet(name: Option<&String>, json: bool) -> Result<String, String> {
 
 // ───────────────────────────── chains ─────────────────────────────
 
-fn chains_cmd(json: bool) -> Result<(), String> {
+fn chains_cmd(json: bool) -> Result<()> {
     let current = chains::default_chain();
     if json {
         let list: Vec<serde_json::Value> = chains::CHAINS
@@ -262,7 +268,7 @@ fn chains_cmd(json: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn use_cmd(args: &[String]) -> Result<(), String> {
+fn use_cmd(args: &[String]) -> Result<()> {
     let key = args.first().ok_or("usage: cairn evm use <chain>")?;
     let chain = chains::by_key_or_id(key)
         .ok_or_else(|| format!("unknown chain '{key}' (try: cairn evm chains)"))?;
@@ -271,7 +277,7 @@ fn use_cmd(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn pick_chain(current: &Chain) -> Result<Option<&'static Chain>, String> {
+fn pick_chain(current: &Chain) -> Result<Option<&'static Chain>> {
     let items: Vec<String> = chains::CHAINS
         .iter()
         .map(|c| {
@@ -290,7 +296,7 @@ fn pick_chain(current: &Chain) -> Result<Option<&'static Chain>, String> {
 
 // ───────────────────────────── address ─────────────────────────────
 
-fn address_cmd(args: &[String], json: bool) -> Result<(), String> {
+fn address_cmd(args: &[String], json: bool) -> Result<()> {
     let o = parse_opts(args, json)?;
     let chain = chain_for(&o.chain)?;
     let name = pick_wallet(o.pos.first(), o.json)?;
@@ -333,7 +339,7 @@ fn address_cmd(args: &[String], json: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn receive_screen(addr: &str) -> Result<(), String> {
+fn receive_screen(addr: &str) -> Result<()> {
     ui::section("Receive address");
     println!();
     println!("  {}", style(addr).cyan().bold());
@@ -368,15 +374,12 @@ fn store_path() -> Option<PathBuf> {
         .map(|h| PathBuf::from(h).join(".cairn").join("evm-tokens.json"))
 }
 
-fn read_small(path: &Path) -> Result<String, String> {
+fn read_small(path: &Path) -> Result<String> {
     let f = crate::hardening::open_read(path)
         .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
     let meta = f.metadata().map_err(|e| e.to_string())?;
     if !meta.is_file() || meta.len() > MAX_FILE {
-        return Err(format!(
-            "{} is not a regular file of a sane size",
-            path.display()
-        ));
+        return Err(format!("{} is not a regular file of a sane size", path.display()).into());
     }
     let mut s = String::new();
     f.take(MAX_FILE + 1)
@@ -395,7 +398,7 @@ fn load_store() -> TokenStore {
         .unwrap_or_default()
 }
 
-fn save_store(store: &TokenStore) -> Result<(), String> {
+fn save_store(store: &TokenStore) -> Result<()> {
     let p = store_path().ok_or("HOME not set")?;
     if let Some(dir) = p.parent() {
         crate::hardening::ensure_private_dir(dir)?;
@@ -412,7 +415,7 @@ fn tokens_for(chain_key: &str) -> Vec<StoredToken> {
         .unwrap_or_default()
 }
 
-fn add_token(chain_key: &str, token: StoredToken) -> Result<(), String> {
+fn add_token(chain_key: &str, token: StoredToken) -> Result<()> {
     let mut store = load_store();
     let list = store.chains.entry(chain_key.to_string()).or_default();
     list.retain(|t| !t.address.eq_ignore_ascii_case(&token.address));
@@ -420,7 +423,7 @@ fn add_token(chain_key: &str, token: StoredToken) -> Result<(), String> {
     save_store(&store)
 }
 
-fn remove_token(chain_key: &str, addr: &str) -> Result<bool, String> {
+fn remove_token(chain_key: &str, addr: &str) -> Result<bool> {
     let mut store = load_store();
     let mut removed = false;
     if let Some(list) = store.chains.get_mut(chain_key) {
@@ -441,7 +444,7 @@ fn find_token(chain_key: &str, addr: &[u8; 20]) -> Option<StoredToken> {
 
 /// On-chain metadata. `decimals()` is required; `symbol()` and `name()` fall
 /// back gracefully because plenty of tokens implement only one of them.
-fn token_meta(rpc: &Rpc, contract: &[u8; 20]) -> Result<(Option<String>, String, u32), String> {
+fn token_meta(rpc: &Rpc, contract: &[u8; 20]) -> Result<(Option<String>, String, u32)> {
     let raw = rpc.eth_call(contract, &abi::DECIMALS)?;
     let decimals = abi::decode_decimals(&raw)?;
     let symbol = rpc
@@ -456,14 +459,16 @@ fn token_meta(rpc: &Rpc, contract: &[u8; 20]) -> Result<(Option<String>, String,
     Ok((name, symbol, decimals))
 }
 
-fn token_balance(rpc: &Rpc, contract: &[u8; 20], owner: &[u8; 20]) -> Result<U256, String> {
+fn token_balance(rpc: &Rpc, contract: &[u8; 20], owner: &[u8; 20]) -> Result<U256> {
     let raw = rpc.eth_call(contract, &abi::balance_of_data(owner))?;
     abi::decode_uint(&raw, 0)
 }
 
-fn token_cmd(args: &[String], json: bool) -> Result<(), String> {
+fn token_cmd(args: &[String], json: bool) -> Result<()> {
     let Some(sub) = args.first().map(String::as_str) else {
-        return Err("usage: cairn evm token <list|add|remove> [ADDRESS]".into());
+        return Err(crate::error::Error::input(
+            "usage: cairn evm token <list|add|remove> [ADDRESS]",
+        ));
     };
     let o = parse_opts(&args[1..], json)?;
     let chain = chain_for(&o.chain)?;
@@ -580,9 +585,7 @@ fn token_cmd(args: &[String], json: bool) -> Result<(), String> {
             }
             Ok(())
         }
-        other => Err(format!(
-            "unknown token command '{other}' (try: list, add, remove)"
-        )),
+        other => Err(format!("unknown token command '{other}' (try: list, add, remove)").into()),
     }
 }
 
@@ -617,7 +620,7 @@ fn holdings_for(rpc: &Rpc, chain: &Chain, owner: &[u8; 20]) -> Vec<Holding> {
     out
 }
 
-fn balance_cmd(args: &[String], json: bool) -> Result<(), String> {
+fn balance_cmd(args: &[String], json: bool) -> Result<()> {
     let o = parse_opts(args, json)?;
     let chain = chain_for(&o.chain)?;
     let name = pick_wallet(o.pos.first(), o.json)?;
@@ -717,7 +720,7 @@ fn resolve_token(
     raw: &str,
     symbol: Option<String>,
     decimals: Option<u32>,
-) -> Result<StoredToken, String> {
+) -> Result<StoredToken> {
     let contract = address::parse_address(raw)?;
     let mut symbol = symbol;
     let mut decimals = decimals;
@@ -747,7 +750,7 @@ fn resolve_token(
     Ok(token)
 }
 
-fn fees(rpc: &Rpc, o: &Opts) -> Result<(U256, U256), String> {
+fn fees(rpc: &Rpc, o: &Opts) -> Result<(U256, U256)> {
     let base = rpc.base_fee()?;
     let gas_price = if base.is_none() {
         Some(rpc.gas_price()?)
@@ -777,7 +780,7 @@ fn fees(rpc: &Rpc, o: &Opts) -> Result<(U256, U256), String> {
     Ok((max, tip))
 }
 
-fn headroom(estimate: U256) -> Result<U256, String> {
+fn headroom(estimate: U256) -> Result<U256> {
     let floor = U256::from(tx::MIN_GAS_LIMIT);
     if estimate <= floor {
         return Ok(floor);
@@ -789,7 +792,7 @@ fn headroom(estimate: U256) -> Result<U256, String> {
     Ok(padded.min(U256::from(tx::MAX_GAS_LIMIT)))
 }
 
-fn send_cmd(args: &[String], json: bool) -> Result<(), String> {
+fn send_cmd(args: &[String], json: bool) -> Result<()> {
     let o = parse_opts(args, json)?;
     let chain = chain_for(&o.chain)?;
     let to = address::parse_address(o.to.as_deref().ok_or("--to is required")?)?;
@@ -862,7 +865,8 @@ fn send_cmd(args: &[String], json: bool) -> Result<(), String> {
             chain.symbol,
             units::format_units(native, chain.decimals),
             chain.symbol
-        ));
+        )
+        .into());
     }
     if let Some(t) = &transaction.token {
         let contract = transaction.to_bytes()?;
@@ -873,7 +877,8 @@ fn send_cmd(args: &[String], json: bool) -> Result<(), String> {
                 t.symbol,
                 t.amount,
                 units::format_units(held, t.decimals)
-            ));
+            )
+            .into());
         }
     }
 
@@ -916,13 +921,13 @@ fn send_cmd(args: &[String], json: bool) -> Result<(), String> {
         return Err(format!(
             "the node returned hash {hash} but the signed transaction hashes to {}; verify before trusting this node",
             signed.hash
-        ));
+        ).into());
     }
     report_broadcast(chain, &hash, o.json);
     Ok(())
 }
 
-fn send_prompt(name: &str, chain: &Chain) -> Result<(), String> {
+fn send_prompt(name: &str, chain: &Chain) -> Result<()> {
     let to = ui::ask("Recipient address (0x…)")?;
     let token = ui::ask("Token contract (blank for native)")?;
     let amount = ui::ask("Amount")?;
@@ -961,7 +966,7 @@ fn report_broadcast(chain: &Chain, hash: &str, json: bool) {
     println!();
 }
 
-fn review(tx: &UnsignedTx, chain: &Chain) -> Result<(), String> {
+fn review(tx: &UnsignedTx, chain: &Chain) -> Result<()> {
     header("EVM · review", chain);
     ui::section("Transaction");
     println!();
@@ -1031,7 +1036,7 @@ fn review(tx: &UnsignedTx, chain: &Chain) -> Result<(), String> {
 
 // ───────────────────────────── offline sign / broadcast ─────────────────────────────
 
-fn write_json<T: Serialize>(path: &str, value: &T) -> Result<(), String> {
+fn write_json<T: Serialize>(path: &str, value: &T) -> Result<()> {
     let body = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
     let p = Path::new(path);
     if let Some(dir) = p.parent() {
@@ -1042,12 +1047,14 @@ fn write_json<T: Serialize>(path: &str, value: &T) -> Result<(), String> {
     crate::hardening::write_private(p, &body)
 }
 
-fn read_json<T: for<'de> Deserialize<'de>>(path: &str) -> Result<T, String> {
+fn read_json<T: for<'de> Deserialize<'de>>(path: &str) -> Result<T> {
     let text = read_small(Path::new(path))?;
-    serde_json::from_str(&text).map_err(|e| format!("{path} is not a valid transaction file: {e}"))
+    serde_json::from_str(&text)
+        .map_err(|e| format!("{path} is not a valid transaction file: {e}"))
+        .map_err(crate::error::Error::from)
 }
 
-fn sign_cmd(args: &[String], json: bool) -> Result<(), String> {
+fn sign_cmd(args: &[String], json: bool) -> Result<()> {
     let o = parse_opts(args, json)?;
     let path = o
         .pos
@@ -1076,7 +1083,8 @@ fn sign_cmd(args: &[String], json: bool) -> Result<(), String> {
         return Err(format!(
             "this transaction is from {} but wallet '{name}' index {} is {ours}; refusing to sign",
             transaction.from, o.index
-        ));
+        )
+        .into());
     }
 
     if !o.json {
@@ -1112,7 +1120,7 @@ fn sign_cmd(args: &[String], json: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn broadcast_cmd(args: &[String], json: bool) -> Result<(), String> {
+fn broadcast_cmd(args: &[String], json: bool) -> Result<()> {
     let o = parse_opts(args, json)?;
     let path = o
         .pos
@@ -1132,7 +1140,8 @@ fn broadcast_cmd(args: &[String], json: bool) -> Result<(), String> {
         return Err(format!(
             "the node returned hash {hash} but the signature hashes to {}; do not trust this node",
             signed.hash
-        ));
+        )
+        .into());
     }
     report_broadcast(chain, &hash, o.json);
     Ok(())
@@ -1145,14 +1154,14 @@ struct Snapshot {
     holdings: Vec<Holding>,
 }
 
-fn sync_snapshot(chain: &'static Chain, owner: &[u8; 20]) -> Result<Snapshot, String> {
+fn sync_snapshot(chain: &'static Chain, owner: &[u8; 20]) -> Result<Snapshot> {
     let rpc = Rpc::connect(chain)?;
     let native = rpc.balance(owner)?;
     let holdings = holdings_for(&rpc, chain, owner);
     Ok(Snapshot { native, holdings })
 }
 
-fn tokens_prompt(chain: &Chain) -> Result<(), String> {
+fn tokens_prompt(chain: &Chain) -> Result<()> {
     loop {
         header("EVM · tokens", chain);
         let list = tokens_for(chain.key);
@@ -1188,7 +1197,7 @@ fn tokens_prompt(chain: &Chain) -> Result<(), String> {
                 ];
                 if let Err(e) = token_cmd(&args, false) {
                     println!();
-                    ui::fail(&e);
+                    ui::fail(e.message());
                 }
                 ui::pause();
             }
@@ -1221,7 +1230,7 @@ impl Holding {
     }
 }
 
-fn dashboard() -> Result<(), String> {
+fn dashboard() -> Result<()> {
     let name = choose_wallet(None)?;
     let opened = unlock_wallet(&name)?;
     let watch = EvmWatch::from_opened(&opened)?;
@@ -1241,7 +1250,7 @@ fn dashboard() -> Result<(), String> {
                     snapshot = Some(s);
                     last_err = None;
                 }
-                Err(e) => last_err = Some(e),
+                Err(e) => last_err = Some(e.into()),
             }
             need_sync = false;
         }
@@ -1331,7 +1340,7 @@ fn dashboard() -> Result<(), String> {
             1 => {
                 if let Err(e) = send_prompt(&name, chain) {
                     println!();
-                    ui::fail(&e);
+                    ui::fail(e.message());
                     ui::pause();
                 } else {
                     need_sync = true;
@@ -1340,7 +1349,7 @@ fn dashboard() -> Result<(), String> {
             2 => {
                 if let Err(e) = tokens_prompt(chain) {
                     println!();
-                    ui::fail(&e);
+                    ui::fail(e.message());
                     ui::pause();
                 }
                 need_sync = true;

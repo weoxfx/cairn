@@ -6,7 +6,10 @@
 //! and signatures commit to those values (a lying server can make a transaction
 //! invalid, not steal coins).
 
+use crate::error::{Error, Kind, Result};
+
 use crate::hardening;
+use crate::http;
 use crate::network;
 use crate::wallet::Watch;
 use bitcoin::{Network, Txid};
@@ -103,7 +106,7 @@ pub fn selectable_nets() -> Vec<Net> {
 
 /// Pick the API server that matches the wallet's chain. This is the single place
 /// that prevents a testnet wallet from talking to a mainnet server.
-pub fn net_for(wallet: Network) -> Result<Net, String> {
+pub fn net_for(wallet: Network) -> Result<Net> {
     if wallet == Network::Bitcoin {
         return Ok(Net::Mainnet);
     }
@@ -156,7 +159,7 @@ pub fn load_config() {
     }
 }
 
-pub fn set_net(n: Net) -> Result<(), String> {
+pub fn set_net(n: Net) -> Result<()> {
     let p = config_path().ok_or("HOME not set")?;
     if let Some(dir) = p.parent() {
         hardening::ensure_private_dir(dir)?;
@@ -213,66 +216,19 @@ fn mark_cooling(p: &str) {
 
 // ---------- HTTP with failover ----------
 
-/// Optional SOCKS5/Tor proxy. `CAIRN_PROXY` wins; `CAIRN_TOR=1` is shorthand
-/// for the standard local Tor SOCKS port. DNS is resolved by the proxy for
-/// hostnames, so an own-node hostname is not leaked to the local resolver.
-fn proxy_from_values(proxy: Option<&str>, tor: Option<&str>) -> Option<String> {
-    if let Some(v) = proxy {
-        let v = v.trim();
-        if !v.is_empty() {
-            return Some(v.to_string());
-        }
-    }
-    match tor {
-        Some("1") | Some("true") | Some("yes") => Some("socks5://127.0.0.1:9050".into()),
-        _ => None,
-    }
-}
-
-fn proxy_setting() -> Option<String> {
-    proxy_from_values(
-        std::env::var("CAIRN_PROXY").ok().as_deref(),
-        std::env::var("CAIRN_TOR").ok().as_deref(),
-    )
-}
-
-/// Human-readable proxy description with credentials removed.
-fn proxy_desc_for(p: &str) -> String {
-    if let Some(at) = p.rfind('@') {
-        let scheme = p.split("://").next().unwrap_or("proxy");
-        format!("{scheme}://***@{}", &p[at + 1..])
-    } else {
-        p.to_string()
-    }
-}
-
 pub fn proxy_desc() -> Option<String> {
-    proxy_setting().map(|p| proxy_desc_for(&p))
+    http::proxy_setting().map(|p| http::proxy_desc_for(&p))
 }
 
-fn agent() -> Result<&'static ureq::Agent, String> {
-    static AGENT: OnceLock<Result<ureq::Agent, String>> = OnceLock::new();
+fn agent() -> Result<&'static ureq::Agent> {
+    static AGENT: OnceLock<Result<ureq::Agent>> = OnceLock::new();
     let built = AGENT.get_or_init(|| {
-        let mut builder = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(10))
-            .timeout_read(Duration::from_secs(30))
-            .timeout(Duration::from_secs(45))
-            .user_agent(concat!(
-                "cairn/",
-                env!("CARGO_PKG_VERSION"),
-                " (open-source bitcoin wallet)"
-            ))
-            .https_only(true) // refuse http outright
-            .redirects(0) // redirects are followed manually below, same host only
-            .max_idle_connections(0); // fresh connection each time: no stale pooled sockets
-        if let Some(p) = proxy_setting() {
-            // A configured privacy proxy must never be silently ignored: an
-            // invalid value fails closed before any request is made.
-            let proxy = ureq::Proxy::new(&p)
-                .map_err(|e| format!("invalid CAIRN_PROXY/CAIRN_TOR setting: {e}"))?;
-            builder = builder.proxy(proxy);
-        }
-        Ok(builder.build())
+        http::agent(
+            "open-source bitcoin wallet",
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+            Duration::from_secs(45),
+        )
     });
     built.as_ref().map_err(|e| e.clone())
 }
@@ -282,40 +238,22 @@ fn agent() -> Result<&'static ureq::Agent, String> {
 /// control, bidi, zero-width, line-breaking or terminal-escape character can
 /// slip through. The result is also bounded by character count.
 fn safe_text(s: &str, max_chars: usize) -> String {
-    s.chars()
-        .filter(|c| c.is_ascii_graphic() || *c == ' ')
-        .take(max_chars)
-        .collect()
+    http::safe_text(s, max_chars)
 }
 
-fn read_body(resp: ureq::Response) -> Result<String, String> {
-    let mut body = String::new();
-    resp.into_reader()
-        .take(MAX_BODY + 1)
-        .read_to_string(&mut body)
-        .map_err(|e| format!("read error: {e}"))?;
-    if body.len() as u64 > MAX_BODY {
-        return Err("server response exceeds the size limit".into());
-    }
-    Ok(body)
+fn read_body(resp: ureq::Response) -> Result<String> {
+    http::read_body(resp, MAX_BODY, "server response")
 }
 
-fn status_error(code: u16, resp: ureq::Response) -> String {
-    let mut b = String::new();
-    let _ = resp.into_reader().take(2000).read_to_string(&mut b);
-    if code == 429 || code >= 500 {
-        format!("server busy or down (HTTP {code})")
-    } else {
-        // Definitive answer (e.g. a transaction rejected): don't retry elsewhere.
-        format!("REJECTED: {}", safe_text(b.trim(), 500))
-    }
+fn status_error(code: u16, resp: ureq::Response) -> Error {
+    http::status_error(code, resp, "server")
 }
 
-fn read_resp(r: Result<ureq::Response, ureq::Error>) -> Result<String, String> {
+fn read_resp(r: std::result::Result<ureq::Response, ureq::Error>) -> Result<String> {
     match r {
         Ok(resp) => read_body(resp),
         Err(ureq::Error::Status(code, resp)) => Err(status_error(code, resp)),
-        Err(e) => Err(format!("network error: {e}")),
+        Err(e) => Err(format!("network error: {e}").into()),
     }
 }
 
@@ -323,7 +261,7 @@ fn is_redirect(code: u16) -> bool {
     matches!(code, 301 | 302 | 303 | 307 | 308)
 }
 
-fn redirect_target(resp: &ureq::Response) -> Result<String, String> {
+fn redirect_target(resp: &ureq::Response) -> Result<String> {
     let location = resp
         .header("location")
         .ok_or("redirect without a Location header")?;
@@ -332,7 +270,7 @@ fn redirect_target(resp: &ureq::Response) -> Result<String, String> {
 
 /// Resolve a Location header against the request URL. Only standard forms are
 /// accepted; anything ambiguous fails closed rather than being guessed at.
-fn resolve_redirect(base: &str, location: &str) -> Result<String, String> {
+fn resolve_redirect(base: &str, location: &str) -> Result<String> {
     // Validate the raw header value: trimming first could hide a control
     // character that a URL parser would treat differently.
     if !url_chars_ok(location) {
@@ -376,7 +314,7 @@ enum GetStep {
     Redirect(String),
 }
 
-fn one_get(url: &str) -> Result<GetStep, String> {
+fn one_get(url: &str) -> Result<GetStep> {
     match agent()?.get(url).call() {
         Ok(resp) if is_redirect(resp.status()) => Ok(GetStep::Redirect(redirect_target(&resp)?)),
         Ok(resp) => Ok(GetStep::Body(read_body(resp)?)),
@@ -384,7 +322,7 @@ fn one_get(url: &str) -> Result<GetStep, String> {
             Ok(GetStep::Redirect(redirect_target(&resp)?))
         }
         Err(ureq::Error::Status(code, resp)) => Err(status_error(code, resp)),
-        Err(e) => Err(format!("network error: {e}")),
+        Err(e) => Err(format!("network error: {e}").into()),
     }
 }
 
@@ -408,7 +346,7 @@ fn pace() {
 /// GET with manual redirect handling. A redirect may only stay on the same
 /// origin and must still satisfy the chain guard, so a provider cannot hand our
 /// requests (and metadata) to an unrelated host.
-fn http_get(net: Net, url: &str) -> Result<String, String> {
+fn http_get(net: Net, url: &str) -> Result<String> {
     pace();
     authority_of(url).ok_or("invalid API URL")?;
     let mut current = url.to_string();
@@ -426,7 +364,7 @@ fn http_get(net: Net, url: &str) -> Result<String, String> {
     Err("too many API redirects".into())
 }
 
-fn http_post(url: &str, body: &str) -> Result<String, String> {
+fn http_post(url: &str, body: &str) -> Result<String> {
     pace();
     match agent()?
         .post(url)
@@ -557,11 +495,7 @@ fn looks_like_url_for(net: Net, p: &str) -> bool {
 }
 
 /// Try each provider (healthy ones first). A provider that fails is rested for a minute.
-fn try_providers(
-    net: Net,
-    path: &str,
-    call: &dyn Fn(&str) -> Result<String, String>,
-) -> Result<String, String> {
+fn try_providers(net: Net, path: &str, call: &dyn Fn(&str) -> Result<String>) -> Result<String> {
     let provs = providers(net);
     for p in &provs {
         if !looks_like_url_for(net, p) {
@@ -576,26 +510,26 @@ fn try_providers(
     let (mut order, resting): (Vec<String>, Vec<String>) =
         provs.into_iter().partition(|p| !is_cooling(p));
     order.extend(resting);
-    let mut last = String::new();
+    let mut last = Error::network(format!("no endpoint answered for {path}"));
     for p in order {
         let url = format!("{p}{path}");
         for attempt in 0..3u64 {
             match call(&url) {
                 Ok(b) => return Ok(b),
                 Err(e) => {
-                    if let Some(msg) = e.strip_prefix("REJECTED:") {
-                        return Err(msg.trim().to_string());
+                    if e.kind() == Kind::Rejected {
+                        return Err(e);
                     }
-                    last = e;
                     if attempt < 2 {
                         // Rate limited (429): back off much longer than for other errors.
-                        let ms = if last.contains("429") {
+                        let ms = if e.message().contains("429") {
                             2000 * (attempt + 1)
                         } else {
                             700
                         };
                         std::thread::sleep(Duration::from_millis(ms));
                     }
+                    last = e;
                 }
             }
         }
@@ -604,26 +538,25 @@ fn try_providers(
     Err(last)
 }
 
-fn get(net: Net, path: &str) -> Result<Value, String> {
+fn get(net: Net, path: &str) -> Result<Value> {
     let body = try_providers(net, path, &|u| http_get(net, u))?;
-    serde_json::from_str(&body).map_err(|e| format!("bad response: {e}"))
+    serde_json::from_str(&body)
+        .map_err(|e| format!("bad response: {e}"))
+        .map_err(crate::error::Error::from)
 }
 
 /// Run `f` over items in parallel, MAX_PARALLEL at a time, keeping order.
-fn par_map<T: Sync, R: Send>(
-    items: &[T],
-    f: impl Fn(&T) -> Result<R, String> + Sync,
-) -> Result<Vec<R>, String> {
+fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> Result<R> + Sync) -> Result<Vec<R>> {
     let mut out = Vec::with_capacity(items.len());
     for chunk in items.chunks(MAX_PARALLEL) {
-        let results: Vec<Result<R, String>> = std::thread::scope(|s| {
+        let results: Vec<Result<R>> = std::thread::scope(|s| {
             let f = &f;
             let handles: Vec<_> = chunk.iter().map(|it| s.spawn(move || f(it))).collect();
             handles
                 .into_iter()
                 .map(|h| {
                     h.join()
-                        .unwrap_or_else(|_| Err("worker panicked".to_string()))
+                        .unwrap_or_else(|_| Err("worker panicked".to_string().into()))
                 })
                 .collect()
         });
@@ -642,9 +575,9 @@ pub struct AddrInfo {
     pub tx_count: u64,
 }
 
-pub fn address_info(net: Net, addr: &str) -> Result<AddrInfo, String> {
+pub fn address_info(net: Net, addr: &str) -> Result<AddrInfo> {
     let v = get(net, &format!("/address/{addr}"))?;
-    let delta = |k: &str| -> Result<i64, String> {
+    let delta = |k: &str| -> Result<i64> {
         let funded = v[k]["funded_txo_sum"].as_u64().unwrap_or(0);
         let spent = v[k]["spent_txo_sum"].as_u64().unwrap_or(0);
         let max = network::MAX_MONEY_SATS as i128;
@@ -697,7 +630,7 @@ fn scan_chain(
     chain: u32,
     gap_limit: u32,
     min_index: u32,
-) -> Result<ChainScan, String> {
+) -> Result<ChainScan> {
     let mut res = ChainScan::default();
     let (mut gap, mut idx) = (0u32, 0u32);
     while (gap < gap_limit || idx < min_index) && idx < MAX_INDEX {
@@ -726,11 +659,7 @@ fn scan_chain(
 }
 
 /// `prev` (if any) makes a quick refresh safe: we always re-check everything known before.
-pub fn sync(
-    watch: &Watch,
-    gap_limit: u32,
-    prev: Option<&WalletState>,
-) -> Result<WalletState, String> {
+pub fn sync(watch: &Watch, gap_limit: u32, prev: Option<&WalletState>) -> Result<WalletState> {
     let net = net_for(watch.network())?;
     let (min_r, min_c) = prev
         .map(|p| (p.next_receive, p.next_change))
@@ -773,9 +702,9 @@ pub struct TxSummary {
 /// History is display-only, but it must still be bounded: a malicious provider
 /// could otherwise print impossible amounts or heights. Every value is checked
 /// against the 21M BTC supply and the running total is kept in range.
-fn net_for_tx(tx: &Value, ours: &HashSet<String>) -> Result<i64, String> {
+fn net_for_tx(tx: &Value, ours: &HashSet<String>) -> Result<i64> {
     let mut net: i64 = 0;
-    let mut add = |value: &Value, sign: i64| -> Result<(), String> {
+    let mut add = |value: &Value, sign: i64| -> Result<()> {
         let v = value
             .as_u64()
             .ok_or("server returned a non-numeric history value")?;
@@ -808,7 +737,7 @@ fn net_for_tx(tx: &Value, ours: &HashSet<String>) -> Result<i64, String> {
     Ok(net)
 }
 
-pub fn transactions(net: Net, state: &WalletState) -> Result<Vec<TxSummary>, String> {
+pub fn transactions(net: Net, state: &WalletState) -> Result<Vec<TxSummary>> {
     let ours: HashSet<String> = state.used.iter().cloned().collect();
     let mut seen: HashMap<String, TxSummary> = HashMap::new();
     // Fetch in bounded batches so a malicious server cannot make us hold a
@@ -870,7 +799,7 @@ pub struct Utxo {
 }
 
 /// Confirmed unspent outputs of one of our own addresses.
-fn parse_utxo(u: &Value, addr: &str) -> Result<Utxo, String> {
+fn parse_utxo(u: &Value, addr: &str) -> Result<Utxo> {
     let txid = u["txid"]
         .as_str()
         .and_then(|s| Txid::from_str(s).ok())
@@ -890,7 +819,7 @@ fn parse_utxo(u: &Value, addr: &str) -> Result<Utxo, String> {
 }
 
 /// Check one server-supplied UTXO against the transaction that created it.
-fn check_prevout(tx: &Value, u: &Utxo) -> Result<(), String> {
+fn check_prevout(tx: &Value, u: &Utxo) -> Result<()> {
     let expected = u.txid.to_string();
     let txid = tx["txid"]
         .as_str()
@@ -928,7 +857,7 @@ fn check_prevout(tx: &Value, u: &Utxo) -> Result<(), String> {
 /// defense in depth: BIP143 already commits to the value, so a lie makes the
 /// transaction invalid rather than stealing, but failing closed here stops the
 /// wallet from signing metadata it has not cross-checked.
-pub fn verify_prevouts(net: Net, utxos: &[Utxo]) -> Result<(), String> {
+pub fn verify_prevouts(net: Net, utxos: &[Utxo]) -> Result<()> {
     if utxos.is_empty() {
         return Ok(());
     }
@@ -939,7 +868,7 @@ pub fn verify_prevouts(net: Net, utxos: &[Utxo]) -> Result<(), String> {
         return Err(format!(
             "refusing to verify {} coins in one transaction (limit {MAX_PREVOUT_TXIDS}); consolidate first",
             txids.len()
-        ));
+        ).into());
     }
     let fetched = par_map(&txids, |t| get(net, &format!("/tx/{t}")))?;
     let by_txid: HashMap<&str, &Value> = txids
@@ -974,7 +903,7 @@ pub struct PrevTx {
     pub confirmed: bool,
 }
 
-fn parse_full_tx(v: &Value) -> Result<PrevTx, String> {
+fn parse_full_tx(v: &Value) -> Result<PrevTx> {
     let txid = v["txid"]
         .as_str()
         .and_then(|s| Txid::from_str(s).ok())
@@ -1053,7 +982,7 @@ fn parse_full_tx(v: &Value) -> Result<PrevTx, String> {
 }
 
 /// Fetch one transaction in full. The returned data is untrusted but bounded.
-pub fn full_tx(net: Net, txid: &str) -> Result<PrevTx, String> {
+pub fn full_tx(net: Net, txid: &str) -> Result<PrevTx> {
     let txid = txid.trim();
     if Txid::from_str(txid).is_err() {
         return Err("not a valid transaction id".into());
@@ -1062,7 +991,7 @@ pub fn full_tx(net: Net, txid: &str) -> Result<PrevTx, String> {
     parse_full_tx(&v)
 }
 
-pub fn utxos(net: Net, addr: &str) -> Result<Vec<Utxo>, String> {
+pub fn utxos(net: Net, addr: &str) -> Result<Vec<Utxo>> {
     let v = get(net, &format!("/address/{addr}/utxo"))?;
     let mut out = vec![];
     for u in v.as_array().into_iter().flatten() {
@@ -1077,7 +1006,7 @@ pub fn utxos(net: Net, addr: &str) -> Result<Vec<Utxo>, String> {
     Ok(out)
 }
 
-pub fn utxos_for(net: Net, addrs: &[String]) -> Result<Vec<Utxo>, String> {
+pub fn utxos_for(net: Net, addrs: &[String]) -> Result<Vec<Utxo>> {
     let mut out = vec![];
     for chunk in addrs.chunks(MAX_PARALLEL) {
         let pages = par_map(chunk, |a| utxos(net, a))?;
@@ -1098,7 +1027,7 @@ pub struct Rates {
 }
 
 /// Fee estimates in sat/vB (clamped to 1..=1000).
-pub fn fee_rates(net: Net) -> Result<Rates, String> {
+pub fn fee_rates(net: Net) -> Result<Rates> {
     let v = get(net, "/fee-estimates")?;
     let pick = |keys: &[&str]| -> Option<f64> { keys.iter().find_map(|k| v[*k].as_f64()) };
     // Reject NaN/inf from the server instead of turning them into a zero fee.
@@ -1116,7 +1045,7 @@ pub fn fee_rates(net: Net) -> Result<Rates, String> {
 }
 
 /// Broadcast a signed transaction (hex). Returns the txid the server reports.
-pub fn broadcast(net: Net, hex: &str) -> Result<String, String> {
+pub fn broadcast(net: Net, hex: &str) -> Result<String> {
     let body = try_providers(net, "/tx", &|u| http_post(u, hex))?;
     let text = body.trim();
     Ok(match Txid::from_str(text) {
@@ -1488,28 +1417,6 @@ mod tests {
         assert_eq!(config_net("  signet\n"), Some(Net::Signet));
         assert_eq!(config_net("Mainnet"), None);
         assert_eq!(config_net("garbage"), None);
-    }
-
-    #[test]
-    fn proxy_settings_are_parsed_and_redacted() {
-        assert_eq!(
-            proxy_from_values(Some("socks5://127.0.0.1:9050"), None).as_deref(),
-            Some("socks5://127.0.0.1:9050")
-        );
-        assert_eq!(
-            proxy_from_values(Some("  "), Some("1")).as_deref(),
-            Some("socks5://127.0.0.1:9050")
-        );
-        assert_eq!(
-            proxy_from_values(Some("socks5://user:pass@host:1080"), Some("1")).as_deref(),
-            Some("socks5://user:pass@host:1080")
-        );
-        assert_eq!(proxy_from_values(None, Some("0")), None);
-        assert_eq!(
-            proxy_desc_for("socks5://user:pass@host:1080"),
-            "socks5://***@host:1080"
-        );
-        assert_eq!(proxy_desc_for("socks5://host:1080"), "socks5://host:1080");
     }
 
     #[test]

@@ -2,6 +2,8 @@
 //! Spends native SegWit (P2WPKH, ECDSA) and Taproot (P2TR, key-path schnorr) coins;
 //! all signing is deterministic and done by libsecp256k1.
 
+use crate::error::Result;
+
 use crate::chain;
 use crate::esplora::{self, Utxo, WalletState};
 use crate::network;
@@ -33,22 +35,24 @@ const FEE_PERCENT_FLOOR_SATS: u64 = 10_000; // allow normal fees on small sends
 
 // ---------- parsing ----------
 
-pub fn parse_address(s: &str, network: Network) -> Result<Address, String> {
+pub fn parse_address(s: &str, network: Network) -> Result<Address> {
     let a: Address<NetworkUnchecked> = s
         .trim()
         .parse()
         .map_err(|e| format!("Not a valid Bitcoin address: {e}"))?;
-    a.require_network(network).map_err(|_| {
-        if network == Network::Bitcoin {
-            "Wrong network: need a mainnet address starting with bc1".to_string()
-        } else {
-            "Wrong network: need a testnet address starting with tb1".to_string()
-        }
-    })
+    a.require_network(network)
+        .map_err(|_| {
+            if network == Network::Bitcoin {
+                "Wrong network: need a mainnet address starting with bc1".to_string()
+            } else {
+                "Wrong network: need a testnet address starting with tb1".to_string()
+            }
+        })
+        .map_err(crate::error::Error::from)
 }
 
 /// Ok(None) means "send everything".
-pub fn parse_amount(s: &str) -> Result<Option<u64>, String> {
+pub fn parse_amount(s: &str) -> Result<Option<u64>> {
     let t = s.trim().to_lowercase();
     if t == "max" {
         return Ok(None);
@@ -87,7 +91,7 @@ pub fn dust_limit(spk: &Script) -> u64 {
 /// Script of an address string. Only the script shape is needed for sizing and
 /// signing; the network binding is enforced by [`parse_address`] wherever an
 /// address is accepted from outside.
-pub fn script_of(addr: &str) -> Result<ScriptBuf, String> {
+pub fn script_of(addr: &str) -> Result<ScriptBuf> {
     let a: Address<NetworkUnchecked> = addr
         .parse()
         .map_err(|e| format!("Not a valid Bitcoin address: {e}"))?;
@@ -108,7 +112,7 @@ fn output_vbytes(spk: &Script) -> u64 {
 
 /// Size estimate for this concrete set of coins and outputs. Under-estimating a
 /// fee is what strands a transaction, so every value above is a slight over-estimate.
-fn tx_vbytes(inputs: &[Utxo], outputs: &[ScriptBuf]) -> Result<u64, String> {
+fn tx_vbytes(inputs: &[Utxo], outputs: &[ScriptBuf]) -> Result<u64> {
     let mut v = 11u64;
     for u in inputs {
         v += input_vbytes(&script_of(&u.address)?);
@@ -137,7 +141,7 @@ pub struct Plan {
 /// Reject a fee that is either above the absolute ceiling or a large fraction
 /// of what the recipient receives. The floor keeps ordinary fees on small
 /// sends from being rejected.
-pub(crate) fn check_fee(fee: u64, amount: u64) -> Result<(), String> {
+pub(crate) fn check_fee(fee: u64, amount: u64) -> Result<()> {
     let percent = if amount == 0 {
         f64::INFINITY
     } else {
@@ -148,7 +152,8 @@ pub(crate) fn check_fee(fee: u64, amount: u64) -> Result<(), String> {
             "fee of {fee} sats is above the safety cap ({MAX_FEE_PERCENT:.0}% of the amount, \
              with a {FEE_PERCENT_FLOOR_SATS}-sat floor and a {MAX_FEE_SATS}-sat hard limit); \
              lower the fee rate"
-        ));
+        )
+        .into());
     }
     Ok(())
 }
@@ -156,7 +161,7 @@ pub(crate) fn check_fee(fee: u64, amount: u64) -> Result<(), String> {
 /// Wallet-independent fee-rate ceiling. This catches a crafted PSBT that hides
 /// a huge fee behind a large change output, where the percentage check alone
 /// would be too weak (L-01).
-pub(crate) fn check_fee_rate(fee: u64, vsize: u64) -> Result<(), String> {
+pub(crate) fn check_fee_rate(fee: u64, vsize: u64) -> Result<()> {
     if vsize == 0 {
         return Err("cannot verify a fee for an empty transaction".into());
     }
@@ -166,7 +171,8 @@ pub(crate) fn check_fee_rate(fee: u64, vsize: u64) -> Result<(), String> {
             "fee of {fee} sats is above the {:.0} sat/vB ceiling for a {vsize}-vB transaction \
              (max {max} sats); refusing to continue",
             network::MAX_FEE_RATE
-        ));
+        )
+        .into());
     }
     Ok(())
 }
@@ -178,7 +184,7 @@ pub fn plan(
     amount: Option<u64>,
     rate: f64,
     change_addr: Address,
-) -> Result<Plan, String> {
+) -> Result<Plan> {
     let mut seen = HashSet::new();
     for u in &utxos {
         if !seen.insert((u.txid, u.vout)) {
@@ -216,7 +222,7 @@ pub fn plan(
             let change_spk = change_addr.script_pubkey();
             let dust = dust_limit(&to_spk);
             if amt < dust {
-                return Err(format!("Amount is below the dust limit ({dust} sats)"));
+                return Err(format!("Amount is below the dust limit ({dust} sats)").into());
             }
             let mut sel: Vec<Utxo> = vec![];
             let mut sum = 0u64;
@@ -256,7 +262,9 @@ pub fn plan(
                     });
                 }
             }
-            Err("Not enough confirmed funds for this amount plus the fee".into())
+            Err(crate::error::Error::input(
+                "Not enough confirmed funds for this amount plus the fee",
+            ))
         }
     }
 }
@@ -265,7 +273,7 @@ pub fn plan(
 
 /// Let the user pick which coins to spend. Returns the selected subset in the
 /// same order as the server supplied it.
-pub fn coin_control(utxos: Vec<Utxo>) -> Result<Vec<Utxo>, String> {
+pub fn coin_control(utxos: Vec<Utxo>) -> Result<Vec<Utxo>> {
     if utxos.is_empty() {
         return Err("No confirmed coins found.".into());
     }
@@ -296,7 +304,7 @@ pub fn coin_control(utxos: Vec<Utxo>) -> Result<Vec<Utxo>, String> {
 }
 
 /// Ask whether to use automatic selection or coin control.
-pub fn maybe_coin_control(utxos: Vec<Utxo>) -> Result<Vec<Utxo>, String> {
+pub fn maybe_coin_control(utxos: Vec<Utxo>) -> Result<Vec<Utxo>> {
     let manual = Confirm::with_theme(&theme())
         .with_prompt("Choose coins manually? (coin control)")
         .default(false)
@@ -344,7 +352,7 @@ pub fn build_tx(p: &Plan) -> Transaction {
 }
 
 /// Address -> (chain, index) for every address the wallet may have used.
-pub fn keymap(watch: &Watch, state: &WalletState) -> Result<HashMap<String, (u32, u32)>, String> {
+pub fn keymap(watch: &Watch, state: &WalletState) -> Result<HashMap<String, (u32, u32)>> {
     let mut map = HashMap::new();
     for (chain, count) in [(0u32, state.next_receive), (1u32, state.next_change)] {
         if count > 0 {
@@ -362,7 +370,7 @@ pub fn build_psbt(
     watch: &Watch,
     keymap: &HashMap<String, (u32, u32)>,
     master_fp: Fingerprint,
-) -> Result<Psbt, String> {
+) -> Result<Psbt> {
     let mut psbt = Psbt::from_unsigned_tx(build_tx(p)).map_err(|e| e.to_string())?;
     for (i, u) in p.inputs.iter().enumerate() {
         let (chain, index) = *keymap
@@ -405,7 +413,7 @@ pub fn sign(
     p: &Plan,
     signer: &Signer,
     keymap: &HashMap<String, (u32, u32)>,
-) -> Result<(), String> {
+) -> Result<()> {
     let secp = Secp256k1::new();
 
     // Taproot sighashes commit to every input's value and script, so all the
@@ -538,7 +546,7 @@ pub fn review(p: &Plan, network: Network) {
 }
 
 /// Returns Ok(true) if a transaction was broadcast.
-pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Result<bool, String> {
+pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Result<bool> {
     let network = watch.network();
     let net = esplora::net_for(network)?;
     let unit = network::unit(network);
@@ -557,20 +565,20 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
 
     let to_str: String = Input::with_theme(&theme())
         .with_prompt("Recipient address")
-        .validate_with(|s: &String| -> Result<(), String> { parse_address(s, network).map(|_| ()) })
+        .validate_with(|s: &String| -> Result<()> { parse_address(s, network).map(|_| ()) })
         .interact_text()
         .map_err(|e| e.to_string())?;
     let to = parse_address(&to_str, network)?;
 
     let amt_str: String = Input::with_theme(&theme())
         .with_prompt("Amount (e.g. 0.0005, 50000 sats, or max)")
-        .validate_with(|s: &String| -> Result<(), String> { parse_amount(s).map(|_| ()) })
+        .validate_with(|s: &String| -> Result<()> { parse_amount(s).map(|_| ()) })
         .interact_text()
         .map_err(|e| e.to_string())?;
     let amount = parse_amount(&amt_str)?;
 
     // Our coins, and fee estimates.
-    let loaded = spin("Loading your coins and fees…", || -> Result<_, String> {
+    let loaded = spin("Loading your coins and fees…", || -> Result<_> {
         let keymap = keymap(watch, state)?;
         let addrs: Vec<String> = state
             .used
@@ -618,7 +626,7 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
         None => Input::with_theme(&theme())
             .with_prompt("Fee rate in sat/vB (estimates unavailable)")
             .default(2.0f64)
-            .validate_with(|v: &f64| -> Result<(), &str> {
+            .validate_with(|v: &f64| -> std::result::Result<(), &str> {
                 if *v >= 1.0 && *v <= network::MAX_FEE_RATE {
                     Ok(())
                 } else {
@@ -667,7 +675,7 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
 
     // Password again, then unlock keys just for signing. This goes through the
     // same retry policy as opening a wallet.
-    let opened = crate::unlock_wallet_with(name, Some(fp), "Password to sign")?;
+    let opened = crate::cli::unlock_wallet_with(name, Some(fp), "Password to sign")?;
     if opened.network != network {
         return Err("Wallet network changed. Nothing was sent.".into());
     }
@@ -712,8 +720,8 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
             pause();
             Ok(true)
         }
-        Err(e) if e.starts_with("REJECTED:") => Err(e),
-        Err(e) => Err(format!("Broadcast status unknown: {e}")),
+        Err(e) if e.kind() == crate::error::Kind::Rejected => Err(e),
+        Err(e) => Err(format!("Broadcast status unknown: {e}").into()),
     }
 }
 

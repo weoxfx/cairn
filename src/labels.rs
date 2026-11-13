@@ -5,6 +5,8 @@
 //! the same private, atomic helper as the wallet config, and labels are bounded
 //! and stripped of terminal control characters before they can be displayed.
 
+use crate::error::Result;
+
 use crate::hardening;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -26,7 +28,7 @@ pub struct Labels {
     entries: Vec<Entry>,
 }
 
-fn path() -> Result<PathBuf, String> {
+fn path() -> Result<PathBuf> {
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
     let base = PathBuf::from(home).join(".cairn");
     hardening::ensure_private_dir(&base)?;
@@ -37,7 +39,7 @@ pub fn valid_txid(txid: &str) -> bool {
     txid.len() == 64 && txid.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-fn clean_label(label: &str) -> Result<String, String> {
+fn clean_label(label: &str) -> Result<String> {
     let cleaned: String = label
         .chars()
         .filter(|c| !c.is_control())
@@ -55,14 +57,14 @@ impl Labels {
         Labels { entries: vec![] }
     }
 
-    pub fn load() -> Result<Self, String> {
+    pub fn load() -> Result<Self> {
         let p = path()?;
         let data = match fs::read(&p) {
             Ok(d) => d,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Labels { entries: vec![] })
             }
-            Err(e) => return Err(format!("cannot read labels: {e}")),
+            Err(e) => return Err(format!("cannot read labels: {e}").into()),
         };
         if data.len() as u64 > MAX_LABEL_FILE {
             return Err("labels file is unexpectedly large".into());
@@ -91,7 +93,7 @@ impl Labels {
             .map(|e| e.label.as_str())
     }
 
-    pub fn set(&mut self, txid: &str, label: &str) -> Result<(), String> {
+    pub fn set(&mut self, txid: &str, label: &str) -> Result<()> {
         if !valid_txid(txid) {
             return Err("Not a valid transaction id".into());
         }
@@ -106,13 +108,13 @@ impl Labels {
         self.save()
     }
 
-    pub fn remove(&mut self, txid: &str) -> Result<(), String> {
+    pub fn remove(&mut self, txid: &str) -> Result<()> {
         self.entries
             .retain(|e| !e.reference.eq_ignore_ascii_case(txid));
         self.save()
     }
 
-    fn save(&self) -> Result<(), String> {
+    fn save(&self) -> Result<()> {
         let mut out = String::new();
         for entry in &self.entries {
             out.push_str(&serde_json::to_string(entry).map_err(|e| e.to_string())?);

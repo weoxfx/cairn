@@ -5,6 +5,8 @@
 //! network, fingerprint and KDF metadata in the AAD, so editing any of those fields
 //! makes decryption fail instead of silently relabelling a mainnet wallet.
 
+use crate::error::Result;
+
 use crate::hardening;
 use argon2::{Algorithm, Argon2, Params, Version};
 use bip39::Mnemonic;
@@ -78,7 +80,7 @@ impl AddressType {
         }
     }
 
-    pub fn parse(s: &str) -> Result<Self, String> {
+    pub fn parse(s: &str) -> Result<Self> {
         match s {
             "p2wpkh" => Ok(AddressType::P2wpkh),
             "p2tr" => Ok(AddressType::P2tr),
@@ -133,7 +135,7 @@ impl Drop for Opened {
     }
 }
 
-fn network_id(network: Network) -> Result<&'static str, String> {
+fn network_id(network: Network) -> Result<&'static str> {
     match network {
         Network::Bitcoin => Ok("mainnet"),
         Network::Testnet | Network::Testnet4 | Network::Signet => Ok("testnet"),
@@ -141,7 +143,7 @@ fn network_id(network: Network) -> Result<&'static str, String> {
     }
 }
 
-fn parse_network(s: &str) -> Result<Network, String> {
+fn parse_network(s: &str) -> Result<Network> {
     match s {
         "mainnet" => Ok(Network::Bitcoin),
         "testnet" => Ok(Network::Testnet),
@@ -156,7 +158,7 @@ fn aad_v2(
     p: &KdfParams,
     salt: &[u8],
     nonce: &[u8],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>> {
     Ok(format!(
         "cairn-keystore-v2\nnetwork={}\nfingerprint={fingerprint}\nkdf=argon2id\n\
          memory_kib={}\niterations={}\nparallelism={}\nsalt={}\nnonce={}\n",
@@ -180,7 +182,7 @@ fn aad_v3(
     salt: &[u8],
     nonce: &[u8],
     passphrase: bool,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>> {
     Ok(format!(
         "cairn-keystore-v3\nnetwork={}\nfingerprint={fingerprint}\nkdf=argon2id\n\
          memory_kib={}\niterations={}\nparallelism={}\nsalt={}\nnonce={}\npassphrase={}\n",
@@ -205,7 +207,7 @@ fn aad_v4(
     nonce: &[u8],
     passphrase: bool,
     address_type: AddressType,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>> {
     Ok(format!(
         "cairn-keystore-v4\nnetwork={}\nfingerprint={fingerprint}\nkdf=argon2id\n\
          memory_kib={}\niterations={}\nparallelism={}\nsalt={}\nnonce={}\npassphrase={}\n\
@@ -223,7 +225,7 @@ fn aad_v4(
 }
 
 /// A tampered wallet file must not be able to weaken the KDF or exhaust memory.
-pub fn validate_params(p: &KdfParams) -> Result<(), String> {
+pub fn validate_params(p: &KdfParams) -> Result<()> {
     // Upper bounds are deliberately tight: a tampered file cannot make us burn
     // gigabytes of memory or minutes of CPU before authentication fails. New
     // wallets use 128 MiB / 3 passes, well inside the accepted window.
@@ -238,7 +240,7 @@ pub fn validate_params(p: &KdfParams) -> Result<(), String> {
 }
 
 /// Random bytes straight from the OS.
-pub fn random_bytes<const N: usize>() -> Result<[u8; N], String> {
+pub fn random_bytes<const N: usize>() -> Result<[u8; N]> {
     let mut buf = [0u8; N];
     getrandom::getrandom(&mut buf).map_err(|e| format!("OS randomness failed: {e}"))?;
     Ok(buf)
@@ -252,7 +254,7 @@ pub fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-pub fn wallet_dir() -> Result<PathBuf, String> {
+pub fn wallet_dir() -> Result<PathBuf> {
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
     let base = PathBuf::from(home).join(".cairn");
     crate::hardening::ensure_private_dir(&base)?;
@@ -261,14 +263,14 @@ pub fn wallet_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn wallet_path(name: &str) -> Result<PathBuf, String> {
+fn wallet_path(name: &str) -> Result<PathBuf> {
     if !valid_name(name) {
         return Err("Name may only use letters, numbers, - and _ (max 32)".into());
     }
     Ok(wallet_dir()?.join(format!("{name}.cairn")))
 }
 
-pub fn list_wallets() -> Result<Vec<String>, String> {
+pub fn list_wallets() -> Result<Vec<String>> {
     let mut out = vec![];
     for entry in fs::read_dir(wallet_dir()?).map_err(|e| e.to_string())? {
         let p = entry.map_err(|e| e.to_string())?.path();
@@ -282,7 +284,7 @@ pub fn list_wallets() -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-fn derive_key(password: &str, salt: &[u8], p: &KdfParams) -> Result<Zeroizing<[u8; 32]>, String> {
+fn derive_key(password: &str, salt: &[u8], p: &KdfParams) -> Result<Zeroizing<[u8; 32]>> {
     validate_params(p)?;
     let params = Params::new(p.memory_kib, p.iterations, p.parallelism, Some(32))
         .map_err(|e| format!("bad KDF params: {e}"))?;
@@ -298,16 +300,12 @@ fn derive_key(password: &str, salt: &[u8], p: &KdfParams) -> Result<Zeroizing<[u
 /// The fingerprint is a hash of the master public key, so it is the same on every
 /// network; the keystore authenticates the wallet network separately in the AAD.
 #[allow(dead_code)] // compatibility/test entry point; production uses fingerprint_with
-pub fn fingerprint(mnemonic: &Mnemonic, network: Network) -> Result<String, String> {
+pub fn fingerprint(mnemonic: &Mnemonic, network: Network) -> Result<String> {
     fingerprint_with(mnemonic, network, "")
 }
 
 /// Fingerprint for a seed derived with a BIP39 passphrase.
-pub fn fingerprint_with(
-    mnemonic: &Mnemonic,
-    network: Network,
-    passphrase: &str,
-) -> Result<String, String> {
+pub fn fingerprint_with(mnemonic: &Mnemonic, network: Network, passphrase: &str) -> Result<String> {
     let seed = Zeroizing::new(mnemonic.to_seed(passphrase));
     let mut master = Xpriv::new_master(network, seed.as_ref()).map_err(|e| e.to_string())?;
     let secp = Secp256k1::new();
@@ -317,12 +315,7 @@ pub fn fingerprint_with(
 }
 
 #[allow(dead_code)] // compatibility/test entry point
-pub fn save(
-    name: &str,
-    password: &str,
-    mnemonic: &Mnemonic,
-    network: Network,
-) -> Result<(), String> {
+pub fn save(name: &str, password: &str, mnemonic: &Mnemonic, network: Network) -> Result<()> {
     save_with(
         name,
         password,
@@ -340,7 +333,7 @@ pub fn save_with(
     mnemonic: &Mnemonic,
     network: Network,
     params: KdfParams,
-) -> Result<(), String> {
+) -> Result<()> {
     save_with_passphrase(
         name,
         password,
@@ -365,7 +358,7 @@ pub fn save_with_passphrase(
     passphrase: Option<&str>,
     params: KdfParams,
     address_type: AddressType,
-) -> Result<(), String> {
+) -> Result<()> {
     let passphrase = passphrase.filter(|p| !p.is_empty());
     let path = wallet_path(name)?;
     if path.exists() {
@@ -418,7 +411,7 @@ pub fn save_with_passphrase(
     // creations cannot silently replace each other (L-05). A random suffix
     // keeps concurrent temp files apart.
     let tmp = path.with_extension(format!("{}.tmp", hex::encode(random_bytes::<8>()?)));
-    let written = (|| -> Result<(), String> {
+    let written = (|| -> Result<()> {
         let mut f = crate::hardening::create_private(&tmp).map_err(|e| e.to_string())?;
         f.write_all(&json).map_err(|e| e.to_string())?;
         f.sync_all().map_err(|e| e.to_string())?;
@@ -448,7 +441,7 @@ pub fn save_with_passphrase(
 /// Open, validate and read the wallet in one step. `O_NOFOLLOW` (and `O_NONBLOCK`
 /// so a planted FIFO cannot hang us) means the checks and the read act on the same
 /// file descriptor, closing the old check/read race.
-fn read_wallet_file(path: &Path) -> Result<Vec<u8>, String> {
+fn read_wallet_file(path: &Path) -> Result<Vec<u8>> {
     let f = crate::hardening::open_read(path).map_err(|e| format!("cannot read wallet: {e}"))?;
     let meta = f
         .metadata()
@@ -488,7 +481,7 @@ pub struct FileInfo {
     pub dir_mode: u32,
 }
 
-pub fn inspect(name: &str) -> Result<FileInfo, String> {
+pub fn inspect(name: &str) -> Result<FileInfo> {
     let path = wallet_path(name)?;
     // Read the permissions first: read_wallet_file silently repairs a file that
     // is group/world readable, and that repair must still be reported.
@@ -519,7 +512,7 @@ pub fn inspect(name: &str) -> Result<FileInfo, String> {
 
 /// Whether opening this wallet will require a BIP39 passphrase. This reads only
 /// public header fields; the password is still required to decrypt.
-pub fn requires_passphrase(name: &str) -> Result<bool, String> {
+pub fn requires_passphrase(name: &str) -> Result<bool> {
     let path = wallet_path(name)?;
     let data = read_wallet_file(&path)?;
     let ks: Keystore =
@@ -529,14 +522,14 @@ pub fn requires_passphrase(name: &str) -> Result<bool, String> {
 
 /// Decrypt a wallet without a BIP39 passphrase.
 #[allow(dead_code)] // compatibility/test entry point; production uses open_with
-pub fn open(name: &str, password: &str) -> Result<Opened, String> {
+pub fn open(name: &str, password: &str) -> Result<Opened> {
     open_with(name, password, None)
 }
 
 /// Decrypt a wallet. Returns the mnemonic, fingerprint and authenticated network.
 /// Wrong password, a tampered file and an unsupported format all produce the same
 /// generic error where possible, so the file cannot be used as an oracle.
-pub fn open_with(name: &str, password: &str, passphrase: Option<&str>) -> Result<Opened, String> {
+pub fn open_with(name: &str, password: &str, passphrase: Option<&str>) -> Result<Opened> {
     let path = wallet_path(name)?;
     let data = read_wallet_file(&path)?;
     let ks: Keystore =
@@ -554,7 +547,7 @@ pub fn open_with(name: &str, password: &str, passphrase: Option<&str>) -> Result
     let nonce = hex::decode(&ks.nonce).map_err(|_| bad())?;
     let ct = hex::decode(&ks.ciphertext).map_err(|_| bad())?;
     if nonce.len() != 12 || !(16..=64).contains(&salt.len()) || ct.is_empty() || ct.len() > 64 {
-        return Err(bad());
+        return Err(bad().into());
     }
 
     let key = derive_key(password, &salt, &ks.kdf_params)?;
@@ -659,7 +652,7 @@ pub fn open_with(name: &str, password: &str, passphrase: Option<&str>) -> Result
     let mnemonic = Box::new(Mnemonic::from_entropy(&entropy).map_err(|_| bad())?);
     let fp = fingerprint_with(&mnemonic, network, &pass)?;
     if fp != ks.fingerprint {
-        return Err(bad());
+        return Err(bad().into());
     }
     hardening::lock_memory(
         mnemonic.as_ref() as *const Mnemonic as *const u8,

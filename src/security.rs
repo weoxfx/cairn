@@ -8,6 +8,8 @@
 //! 2. Passing checks are not a security guarantee. The report says what was and
 //!    was not checked and never calls a wallet "secure".
 
+use crate::error::Result;
+
 use crate::keystore::{self, KdfParams};
 use crate::{esplora, ui};
 use console::style;
@@ -255,7 +257,7 @@ fn kdf_check(kdf: &str, p: &KdfParams) -> (Status, String) {
         return (Status::Fail, format!("unsupported KDF '{kdf}'"));
     }
     if let Err(e) = keystore::validate_params(p) {
-        return (Status::Fail, e);
+        return (Status::Fail, e.into());
     }
     let default = KdfParams::default_strong();
     let detail = |p: &KdfParams| {
@@ -888,7 +890,7 @@ fn path_entries() -> Vec<(String, Option<u32>)> {
 
 // ---------- command ----------
 
-pub fn check(name: &str, json: bool) -> Result<(), String> {
+pub fn check(name: &str, json: bool) -> Result<()> {
     let info = keystore::inspect(name)?;
     let mut report = Report::new(name, &info);
     report.live = !json && ui::interactive();
@@ -906,7 +908,7 @@ pub fn check(name: &str, json: bool) -> Result<(), String> {
     // Integrity can only be shown by actually authenticating the ciphertext.
     let mut words = None;
     let mut bits = None;
-    match crate::unlock_wallet(name) {
+    match crate::cli::unlock_wallet(name) {
         Ok(opened) => {
             words = Some(opened.mnemonic.words().count());
             bits = Some(opened.mnemonic.to_entropy().len() * 8);
@@ -1020,7 +1022,8 @@ pub fn check(name: &str, json: bool) -> Result<(), String> {
     if failures > 0 {
         return Err(format!(
             "security check found {failures} failing check(s); see the report above"
-        ));
+        )
+        .into());
     }
     Ok(())
 }

@@ -4,6 +4,8 @@
 //! Return data is untrusted: every word is bounds-checked, and token text is
 //! reduced to safe printable ASCII before it can reach the screen.
 
+use crate::error::Result;
+
 use primitive_types::U256;
 
 pub const TRANSFER: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
@@ -45,7 +47,7 @@ pub fn pad_u256(v: U256) -> [u8; 32] {
 }
 
 /// Read one 32-byte word.
-pub fn word(data: &[u8], index: usize) -> Result<&[u8], String> {
+pub fn word(data: &[u8], index: usize) -> Result<&[u8]> {
     let start = index
         .checked_mul(32)
         .ok_or_else(|| "return data offset overflow".to_string())?;
@@ -54,15 +56,16 @@ pub fn word(data: &[u8], index: usize) -> Result<&[u8], String> {
         .ok_or_else(|| "return data offset overflow".to_string())?;
     data.get(start..end)
         .ok_or_else(|| "token returned short data".to_string())
+        .map_err(crate::error::Error::from)
 }
 
-pub fn decode_uint(data: &[u8], index: usize) -> Result<U256, String> {
+pub fn decode_uint(data: &[u8], index: usize) -> Result<U256> {
     Ok(U256::from_big_endian(word(data, index)?))
 }
 
 /// Decode `decimals()`; a token that answers with something outside 0..=36 is
 /// rejected rather than guessed at.
-pub fn decode_decimals(data: &[u8]) -> Result<u32, String> {
+pub fn decode_decimals(data: &[u8]) -> Result<u32> {
     let v = decode_uint(data, 0)?;
     if v > U256::from(crate::evm::units::MAX_DECIMALS) {
         return Err("token reported implausible decimals".into());

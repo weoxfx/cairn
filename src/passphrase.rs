@@ -8,6 +8,8 @@
 //! used here purely as a 2048-word alphabet. This is not a seed phrase and is
 //! never labelled as one.
 
+use crate::error::Result;
+
 use bip39::Language;
 use zeroize::Zeroizing;
 
@@ -24,7 +26,7 @@ pub fn entropy_bits(words: usize) -> usize {
 /// Each word is drawn from the OS random source. The index is the low 11 bits of
 /// a uniform 16-bit value; 2048 divides 65536 exactly, so no rejection loop is
 /// needed to keep the choice unbiased.
-pub fn generate(words: usize) -> Result<Zeroizing<String>, String> {
+pub fn generate(words: usize) -> Result<Zeroizing<String>> {
     if words == 0 {
         return Err("a password needs at least one word".into());
     }
