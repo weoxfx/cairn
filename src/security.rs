@@ -993,9 +993,10 @@ pub fn check(name: &str, json: bool) -> Result<(), String> {
          device",
     );
     report.add(
-        "Multisig",
+        "Script-level policy",
         Status::Skip,
-        "not implemented: single-key wallets only, so one device compromise spends the funds",
+        "not implemented: spending policies are n-of-m P2WSH vaults only, without miniscript or \
+         timelocks",
     );
     report.add(
         "Final transaction verification",

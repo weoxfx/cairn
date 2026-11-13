@@ -26,7 +26,11 @@ cargo audit
 
 - Keep them small and focused, and explain the why.
 - Describe how you tested (and on which platform, for example Termux or Linux).
-- Security-sensitive changes (`keystore.rs`, `wallet.rs`, `send.rs`, `offline.rs`, `qr.rs`, `esplora.rs`) get extra review.
+- Security-sensitive changes (`keystore.rs`, `wallet.rs`, `send.rs`, `offline.rs`, `qr.rs`,
+  `esplora.rs`, `electrum.rs`, `chain.rs`, `multisig.rs`) get extra review.
+- Platform-specific code goes through `hardening.rs` helpers rather than `#[cfg]` at each call site,
+  so Linux, macOS and Windows stay in step. Behaviour that only exists on one platform is reported
+  as *not checked*, never as passing.
 
 ## Reporting security issues
 

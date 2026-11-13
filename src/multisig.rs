@@ -23,7 +23,7 @@ use crate::hardening;
 use crate::keystore;
 use crate::network;
 use crate::send;
-use crate::ui::{banner, fmt_btc, hint, kv, ok, pause, section, spin, table, warn};
+use crate::ui::{banner, fail, fmt_btc, hint, kv, menu, ok, pause, section, spin, table, warn};
 use crate::wallet::{self, Signer};
 use bitcoin::absolute::LockTime;
 use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpriv, Xpub};
@@ -850,6 +850,74 @@ pub fn run(argv: &[String], json: bool) -> Result<(), String> {
             "unknown multisig command '{other}' (try: create, list, info, address, balance, psbt, sign, combine, finalize)"
         )),
         None => Err("usage: cairn multisig <create|list|info|address|balance|psbt|sign|combine|finalize>".into()),
+    }
+}
+
+/// Interactive vault screen, reached from the single `cairn` shell.
+pub fn screen() -> Result<(), String> {
+    loop {
+        if let Err(e) = list(false) {
+            warn(&e);
+        }
+        hint("A vault spends by handing PSBT files between cosigners.");
+        println!();
+        let choice = menu(&[
+            "ℹ  Vault details",
+            "↓  Next addresses",
+            "◎  Balance",
+            "⌘  Command reference",
+            "←  Back",
+        ])
+        .unwrap_or(4);
+        match choice {
+            4 => return Ok(()),
+            3 => {
+                banner();
+                section("Vault commands");
+                println!();
+                for line in [
+                    "cairn multisig create --name V ...      create a 2-of-3 vault",
+                    "cairn multisig list                     every vault on this machine",
+                    "cairn multisig info --name V            policy, keys and descriptor",
+                    "cairn multisig address --name V         receive addresses",
+                    "cairn multisig balance --name V         coins held by the vault",
+                    "cairn multisig psbt --name V --to ADDR --amount 0.01 --out spend.psbt",
+                    "cairn multisig sign --name V --psbt spend.psbt --out a.psbt",
+                    "cairn multisig combine a.psbt b.psbt --out signed.psbt",
+                    "cairn multisig finalize --psbt signed.psbt [--broadcast]",
+                ] {
+                    println!("  {line}");
+                }
+                println!();
+                hint("Creating a vault is described in README.md.");
+                println!();
+                pause();
+            }
+            _ => {
+                let name: String = match dialoguer::Input::with_theme(&crate::ui::theme())
+                    .with_prompt("Vault name")
+                    .interact_text()
+                {
+                    Ok(n) => n,
+                    Err(e) => {
+                        fail(&e.to_string());
+                        pause();
+                        continue;
+                    }
+                };
+                let cmd = match choice {
+                    0 => "info",
+                    1 => "address",
+                    _ => "balance",
+                };
+                if let Err(e) = run(&[cmd.to_string(), "--name".into(), name], false) {
+                    println!();
+                    fail(&e);
+                }
+                println!();
+                pause();
+            }
+        }
     }
 }
 

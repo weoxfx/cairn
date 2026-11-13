@@ -1,11 +1,35 @@
 # Cairn
 
-An open-source, self-custody Bitcoin wallet for the command line, built around an encrypted
-keystore, a watch-only session and careful sending.
+An open-source, self-custody wallet for the command line: Bitcoin (SegWit and Taproot), EVM chains
+and 2-of-3 multisig vaults, all from one encrypted seed and one `cairn` shell.
+
+## One wallet, one shell
+
+`cairn` with no arguments is the whole wallet. Bitcoin, EVM accounts and multisig vaults are menu
+items in the same place, so nothing hides behind a subcommand you have to know about:
+
+```
+cairn
+├─ ＋  Create a new wallet
+├─ ◇  Open existing wallet
+├─ ⇩  Import seed phrase
+├─ Ξ  EVM accounts          Ethereum, Base, Arbitrum, OP, Polygon, Sepolia
+├─ ✥  Multisig vaults       2-of-3 vaults and the PSBT commands that spend them
+├─ ⚙  Settings
+└─ ⏻  Exit
+```
+
+The open wallet's dashboard carries the same two entries, so you can look at a Bitcoin balance, check
+an EVM balance and come back without losing the first screen. The subcommands (`cairn evm ...`,
+`cairn multisig ...`, `cairn --offline ...`) are the same code for scripts and cron jobs; they are
+not a separate product.
 
 ## What it does today
 
-- Create, import and open wallets (BIP39, 24 words, native SegWit / BIP84)
+- Create, import and open wallets (BIP39, 24 words, native SegWit / BIP84 or Taproot / BIP86)
+- Taproot key-path signing with schnorr signatures, chosen per wallet and bound into the encrypted header
+- 2-of-3 multisig vaults (n-of-m P2WSH) where each cosigner holds one key and spends through PSBT files
+- Esplora or the Electrum protocol as the chain backend, both pinned to the wallet's network
 - Optional BIP39 passphrase (25th word), asked before the wallet is created or opened
 - Encrypted wallet file (Argon2id + ChaCha20-Poly1305, authenticated metadata)
 - Optional generated password: six words from the OS random source (66 bits), shown once on the
@@ -20,7 +44,9 @@ keystore, a watch-only session and careful sending.
 - Watch-only descriptor export, numeric SeedQR display, and BIP329 transaction labels
 - Machine-readable `--json` output for version, descriptors and labels
 - Mainnet by default; Testnet4, Testnet3 and Signet are available when creating or importing a wallet
-- Runs on Linux x86_64/ARM64, macOS and Android (Termux)
+- Runs on Linux x86_64/ARM64, macOS, Windows 10/11 and Android (Termux)
+- One shell for all of it: wallets, EVM accounts and vaults are menu items in `cairn`, with the same
+  features available as subcommands for scripting
 
 ## Mainnet
 
@@ -40,6 +66,9 @@ phrase offline.
 | Seed | 256 bits from the OS random source, shown once on the terminal's alternate screen (no scrollback), then a 3-word backup quiz. Import asks for the hidden phrase twice |
 | Storage | Only the encrypted entropy is saved. Argon2id (128 MB, 3 passes) then ChaCha20-Poly1305. The v2 AAD authenticates network, fingerprint, KDF parameters, salt and nonce; v3 additionally authenticates whether a BIP39 passphrase is required. The passphrase itself is never stored. Atomic no-replace writes that never follow a symlink, mode 600, `.cairn` kept at 700, symlinked wallet dirs refused, KDF bounds enforced on load. v1/v2 wallets still open |
 | Memory | After unlock only the public account key (xpub) is kept. The decrypted mnemonic and signing keys are held in `mlock`ed allocations when the OS allows it, and erased on drop. Spending keys exist only for the moment of signing |
+| Script types | Each wallet is BIP84 (P2WPKH) or BIP86 (P2TR); the choice is stored in a v4 header and authenticated with the rest of the metadata, so a wallet cannot be reopened as the wrong type. Taproot spends are key-path only, signed with schnorr and `SIGHASH_DEFAULT` |
+| Multisig | Vaults are sorted-key (BIP67) n-of-m P2WSH with public-data vault files. Each cosigner signs with their own keystore and password; signatures are checked against the BIP143 sighash before they are made and again before finalizing, and the vault never holds a private key |
+| Backend | Esplora over HTTPS, or the Electrum protocol over TLS with the server's `genesis_hash` compared to the wallet's chain before any query. Replies are size-bounded, values and positions are validated, and fee bumping stays on Esplora rather than mixing backends |
 | Sending | Re-asks the password, checks the keys match the wallet and each coin, re-fetches each spent coin's creating transaction to compare value/address, checks that the amounts add up, offers coin control, enforces a fee ceiling (10% of the amount, 10k-sat floor, 1M-sat hard cap) and a 1,000 sat/vB absolute rate ceiling, uses deterministic (RFC6979) signatures |
 | Offline | `--offline` never opens a socket. It checks that every input belongs to the wallet, has the expected network-specific BIP84 path and script, that change is ours, that the fee clears the relay minimum and the rate ceiling, and caps PSBTs at 500 inputs / 500 outputs. PSBT files must be regular files (no FIFOs or symlinks) and signed output is written atomically at mode 600. The online side refuses a signed PSBT that changed any input or output. QR frames are checksummed and then go through the same checks; they are public data, not encrypted |
 | Network | HTTPS-only with certificate checks; redirects are same-origin (host and port) and re-checked, broadcasts refuse them. Optional SOCKS5/Tor proxy (`CAIRN_PROXY` or `CAIRN_TOR=1`), with DNS resolved by the proxy. Response size caps fail closed, with rate pacing, failover and a chain-specific URL guard; userinfo and IPv6 authorities are rejected. Server data is treated as untrusted; UTXO/input/output/balance/history amounts and block heights are bounded, txids are validated, and server text is reduced to printable ASCII by an allowlist before display |
@@ -113,6 +142,7 @@ from the [latest release](https://github.com/weoxfx/cairn/releases/latest):
 | Linux ARM64 | `cairn-v*-aarch64-unknown-linux-gnu.tar.gz` |
 | macOS Apple Silicon | `cairn-v*-aarch64-apple-darwin.tar.gz` |
 | macOS Intel | `cairn-v*-x86_64-apple-darwin.tar.gz` |
+| Windows 10/11 x86_64 | `cairn-v*-x86_64-pc-windows-msvc.zip` |
 
 Each archive contains the `cairn` binary, `README.md`, `SECURITY.md` and both licenses. Download the
 matching `.sha256` file and verify it before running:
@@ -250,6 +280,9 @@ fee estimates are per input/output type rather than a single average.
 
 ## Multisig vaults (2-of-3)
 
+Reachable from plain `cairn` under **Multisig vaults** (details, addresses, balance and a command
+reference), or as the `cairn multisig` subcommands below for scripted use.
+
 `cairn multisig` builds n-of-m P2WSH vaults whose cosigner keys are spread across machines or
 hardware wallets. Creating a vault stores only public data (the cosigner xpubs and their origins)
 at `~/.cairn/multisig/<name>.json`, and prints a `wsh(sortedmulti(…))` descriptor you can import
@@ -301,7 +334,8 @@ cairn evm send --to 0x.. --amount 25 --token 0xA0b8...eB48
 ```
 
 Running `cairn evm` with no arguments opens the same kind of dashboard as the Bitcoin side — balance
-card, token table, menu, five-minute idle lock — rather than a different-looking command surface.
+card, token table, menu, five-minute idle lock — rather than a different-looking command surface. In
+the single `cairn` shell it is the **EVM accounts** entry, and the Bitcoin dashboard links to it too.
 
 Supported: Ethereum, Base, Arbitrum One, OP Mainnet, Polygon and Sepolia. Add a chain by adding an
 entry to `CHAINS` in `src/evm/chains.rs`; the registry is checked by tests for duplicate IDs and
@@ -353,8 +387,8 @@ reason and an install hint, never `PASS`. A keylogger or an injected library is 
 loader, tracer and session lines instead of by signatures. It is also availableIn an interactive terminal the report fills in line by line as each check finishes, with a spinner
 over the slow parts (sockets, USB enumeration, the signature scan); `--json` and piped output stay
 plain. It is also available from the wallet dashboard. Features Cairn does not have — hardware signers,
-multisig, backup verification, final signed-transaction re-display, a third-party audit — are
-listed as `SKIP` with the reason, never as `PASS`. A failing check exits non-zero. The report is
+miniscript/timelock policies, backup verification, final signed-transaction re-display, a third-party
+audit — are listed as `SKIP` with the reason, never as `PASS`. A failing check exits non-zero. The report is
 not an audit and does not certify a wallet as secure; passing checks only mean nothing in the
 inspected set was wrong.
 
@@ -390,8 +424,8 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-The release workflow builds a static Linux x86_64 binary, a Linux ARM64 binary and macOS binaries for
-Apple Silicon and Intel, attaches SHA-256 checksums and creates a GitHub Release. When the
+The release workflow builds a static Linux x86_64 binary, a Linux ARM64 binary, macOS binaries for
+Apple Silicon and Intel and a Windows x86_64 zip (SHA-256 checked like the others), attaches SHA-256 checksums and creates a GitHub Release. When the
 `MINISIGN_SECRET_KEY` repository secret is configured it also publishes a signed `SHA256SUMS`
 manifest. See [RELEASE-SIGNING.md](RELEASE-SIGNING.md) and [REPRODUCIBLE.md](REPRODUCIBLE.md).
 

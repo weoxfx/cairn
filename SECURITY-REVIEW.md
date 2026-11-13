@@ -430,6 +430,29 @@ The review's own bottom line: the cryptography and transaction logic are in good
 provenance problem and the post-review mainnet change were resolved in the 2026-11-09 hardening
 pass. This record documents the review findings explicitly.
 
+## Features added after this review (2026-11-13)
+
+The review above predates four features. They are implemented to the same rules (no home-made
+cryptography, authenticated metadata, untrusted network data, no secrets in output) and covered by
+the unit tests listed with each, but they have not been through a separate review pass:
+
+- **Taproot (BIP86).** The address type is stored in a v4 keystore header and included in the AEAD
+  AAD, so a BIP84 wallet cannot be reopened as BIP86 or the reverse; only key-path spends are signed
+  (`SIGHASH_DEFAULT`, no script paths, no annex). Tests cover the BIP86 vector address, schnorr
+  signing and mixed P2WPKH/P2TR sizing.
+- **2-of-3 multisig vaults.** Sorted-key (BIP67) n-of-m P2WSH with public-data vault files, no
+  miniscript. Every signature is checked against the BIP143 sighash before it is produced and again
+  before finalizing; vaults hold no private keys. Tests cover address/descriptor construction, the
+  PSBT sign/combine/finalize path and refusal of foreign inputs.
+- **Electrum backend.** TLS via `rustls` with the WebPKI root set, plaintext only for an explicit
+  `tcp://` address. The server's `genesis_hash` is compared with the wallet's chain before any query,
+  replies are size-bounded, values and positions are validated, and server text is reduced to
+  printable ASCII. Tests cover the documented scripthash vector, reply validation, genesis refusal and
+  fee conversion.
+- **Windows.** Unix-only hardening (`mlock`, `prctl`, core-dump rlimits, POSIX modes) is gated behind
+  `hardening.rs` helpers and reported as *not checked* rather than assumed, so `cairn security` cannot
+  claim a control the platform did not apply.
+
 ## Fuzzing harness (2026-11-08)
 
 `fuzz/` links the real parser modules through a new library target (`src/lib.rs`, `[lib] test = false`)

@@ -23,7 +23,8 @@ when creating or importing a wallet. Source-level reviews are recorded in
   token that can move an existing wallet to another chain.
 - Toolchain: the project pins `1.98.1`; `Cargo.lock` is committed and release checks run with
   `--locked`.
-- Platform reviewed: Linux. The code is Unix-only and also targets macOS and Termux.
+- Platform reviewed: Linux. The same code builds for macOS, Windows 10/11 (MSVC) and Termux; the
+  Unix-only process hardening is gated and reports as unchecked on Windows.
 
 ## Scope
 
@@ -36,6 +37,9 @@ In scope:
 | Transaction construction | `src/send.rs` | Address/amount parsing, coin selection, dust, fee arithmetic, change, SIGHASH_ALL, script/key match. |
 | PSBT and offline flow | `src/offline.rs`, `src/psbt_guard.rs` | PSBT creation, verification, signing, change classification, unsigned/signed comparison, file handling, broadcast, output-count limits and review flooding. |
 | QR transport | `src/qr.rs` | Frame parser bounds, checksum, reassembly, image parsing and decompression limits. |
+| Taproot and address types | `src/keystore.rs`, `src/wallet.rs`, `src/send.rs` | Per-wallet BIP84/BIP86 binding in the v4 keystore header, schnorr key-path signing, mixed-script transaction sizing and dust. |
+| Multisig vaults | `src/multisig.rs` | Sorted-key (BIP67) n-of-m P2WSH, vault file handling, sighash checks on signing and finalizing, PSBT combination. |
+| Electrum backend | `src/electrum.rs`, `src/chain.rs` | TLS trust roots, `genesis_hash` chain binding, JSON-RPC framing and size caps, value/position validation, backend selection and the refusal to bump fees across backends. |
 | Network and API | `src/esplora.rs` | URL chain guard, manual redirects, same-host enforcement, TLS-only client, JSON parsing bounds, UTXO/balance/history validation, prevout cross-check, failover, display history bounds. |
 | Network selection | `src/network.rs`, `src/main.rs`, `src/esplora.rs`, `src/ui.rs` | Mainnet default, testnet selection at creation/import, per-wallet network binding, chain-aware `net_for`, stale-config handling and fail-closed composition. |
 | Local hardening | `src/hardening.rs`, `src/keystore.rs` | rlimits, umask, private directories, atomic/symlink-safe writes, concurrent wallet-creation race. |

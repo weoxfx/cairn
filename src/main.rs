@@ -283,10 +283,11 @@ fn label_tx(txid: &str, label: &str, json: bool) -> Result<(), String> {
 fn help() {
     println!(
         "\
-Cairn — self-custody Bitcoin wallet
+Cairn — one self-custody wallet for Bitcoin and EVM chains
 
 Usage:
-  cairn                                      Interactive wallet
+  cairn                                      The wallet: Bitcoin, EVM accounts
+                                             and multisig vaults in one shell
   cairn --create-psbt [WALLET] [--out FILE]  Build an unsigned PSBT (online)
   cairn --offline <UNSIGNED.psbt> [--out SIGNED.psbt]
                                              Verify and sign a PSBT (offline)
@@ -295,17 +296,18 @@ Usage:
   cairn --qr-show <FILE.psbt>                Show a PSBT as QR frame(s)
   cairn --qr-scan [--out FILE.psbt] <IMAGE>...
                                              Rebuild a PSBT from QR photos
-  cairn --descriptor [WALLET] [--json]       Export BIP84 watch-only descriptors
+  cairn --descriptor [WALLET] [--json]       Export watch-only descriptors (BIP84/BIP86)
   cairn --seedqr [WALLET]                    Show a numeric SeedQR (reveals seed)
   cairn --label <TXID> <LABEL> [--json]      Store a BIP329 transaction label
   cairn security check [WALLET] [--json]     Report what this build can verify
   cairn --security-check [WALLET] [--json]   Same as `security check`
   cairn evm <command>                        EVM accounts, tokens and transfers
-                                             (see `cairn evm help`)
-  cairn multisig <command>                   n-of-m P2WSH vaults, coordinated
-                                             with PSBT files (create, list,
-                                             info, address, balance, psbt,
-                                             sign, combine, finalize)
+                                             from a script (see `cairn evm help`);
+                                             the same screens are in `cairn`
+  cairn multisig <command>                   n-of-m P2WSH vaults from a script
+                                             (create, list, info, address,
+                                             balance, psbt, sign, combine,
+                                             finalize); also inside `cairn`
   cairn --version [--json]                   Show the version
   cairn --help                               Show this help
 
@@ -381,15 +383,19 @@ fn interactive() -> Result<(), String> {
             "＋  Create a new wallet",
             "◇  Open existing wallet",
             "⇩  Import seed phrase",
+            "Ξ  EVM accounts",
+            "✥  Multisig vaults",
             "⚙  Settings",
             "⏻  Exit",
         ])
-        .unwrap_or(4);
+        .unwrap_or(6);
         let result = match choice {
             0 => create_wallet(),
             1 => open_wallet(),
             2 => import_wallet(),
-            3 => settings(),
+            3 => evm_cli::run(&[], false),
+            4 => multisig::screen(),
+            5 => settings(),
             _ => break,
         };
         if let Err(e) = result {
@@ -861,9 +867,11 @@ fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
             "⟳  Refresh",
             "ⓘ  Wallet information",
             "⛨  Security check",
+            "Ξ  EVM accounts",
+            "✥  Multisig vaults",
             "⏻  Lock and exit",
         ])
-        .unwrap_or(7);
+        .unwrap_or(9);
         if asked.elapsed() > IDLE_LOCK {
             banner();
             fail("Locked after 5 minutes of inactivity. Open the wallet again.");
@@ -944,6 +952,20 @@ fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
                     fail(&e);
                 }
                 pause();
+            }
+            7 => {
+                if let Err(e) = evm_cli::run(&[], false) {
+                    println!();
+                    fail(&e);
+                    pause();
+                }
+            }
+            8 => {
+                if let Err(e) = multisig::screen() {
+                    println!();
+                    fail(&e);
+                    pause();
+                }
             }
             _ => return Ok(()),
         }

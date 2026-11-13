@@ -95,6 +95,11 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
 - **Taproot spends are key-path only:** the signer accepts exactly one taproot key origin, requires
   the internal key to match, refuses any taproot input carrying script-path leaves, and checks the
   derived key against the coin's `tr()` script before signing with a deterministic nonce.
+- **Taproot:** the address type is authenticated in the v4 keystore header, so a BIP84 wallet cannot
+  be reopened as BIP86 or the reverse. Only key-path spends are signed (no script paths, no annex).
+- **Windows:** there is no `mlock`, `prctl` or core-dump rlimit to use, so `cairn security` reports
+  those controls as *not checked* instead of passing them, and POSIX mode checks are reported as
+  satisfied rather than silently skipped. Symlink refusal depends on the platform's file API.
 - **Electrum backend:** the server's `genesis_hash` is checked against the wallet's chain before any
   query, replies are size-bounded, values and positions are validated, and each server text message
   is reduced to printable ASCII before display. TLS uses the system-independent WebPKI root set;
