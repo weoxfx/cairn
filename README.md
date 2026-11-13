@@ -217,6 +217,24 @@ The usual PSBT review still happens after scanning.
 - **Labels:** `cairn --label <TXID> "<label>"` stores a BIP329 `tx` record in
   `~/.cairn/labels.jsonl`; labels appear in the transaction list.
 
+## Network backends
+
+The wallet speaks to one chain through either backend, and both are bound to the wallet's network:
+
+- **Esplora** (default) — HTTPS, with the provider URL guard, redirect rules and response caps.
+- **Electrum** — `CAIRN_BACKEND=electrum`, or set `CAIRN_ELECTRUM=host:50002`. The server's
+  `genesis_hash` is compared with the wallet's own chain before anything else happens, so a server
+  for another network is refused rather than trusted.
+
+```bash
+CAIRN_ELECTRUM=electrum.blockstream.info:50002 cairn            # dashboard over Electrum
+CAIRN_ELECTRUM=tcp://127.0.0.1:50001 cairn --json --version     # local node, plaintext
+```
+
+Balance, history, coins, fee estimates, broadcast and the pre-sign transaction check all go through
+whichever backend is selected. Fee bumping stays on Esplora: it needs the previous transaction's
+outputs in the shape that backend reports.
+
 ## Taproot (BIP86)
 
 A wallet is created (or imported) with one address type, and every address it hands out uses it:

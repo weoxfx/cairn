@@ -95,6 +95,10 @@ a few days and to credit reporters who want it. Good-faith research is welcome.
 - **Taproot spends are key-path only:** the signer accepts exactly one taproot key origin, requires
   the internal key to match, refuses any taproot input carrying script-path leaves, and checks the
   derived key against the coin's `tr()` script before signing with a deterministic nonce.
+- **Electrum backend:** the server's `genesis_hash` is checked against the wallet's chain before any
+  query, replies are size-bounded, values and positions are validated, and each server text message
+  is reduced to printable ASCII before display. TLS uses the system-independent WebPKI root set;
+  plaintext is only used when the address explicitly starts with `tcp://`.
 - **Multisig vaults:** vault files hold public keys only. Signing checks the PSBT's witness script
   against the vault's own script for every listed derivation path, rejects key origins that are not
   cosigners, and compares the derived key with the one the script names. Finalizing re-parses the

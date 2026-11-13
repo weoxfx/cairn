@@ -2,6 +2,7 @@
 //! Spends native SegWit (P2WPKH, ECDSA) and Taproot (P2TR, key-path schnorr) coins;
 //! all signing is deterministic and done by libsecp256k1.
 
+use crate::chain;
 use crate::esplora::{self, Utxo, WalletState};
 use crate::network;
 use crate::ui::{banner, fmt_btc, menu, ok, pause, short, spin, theme};
@@ -577,8 +578,8 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
             .filter(|a| keymap.contains_key(*a))
             .cloned()
             .collect();
-        let utxos = esplora::utxos_for(net, &addrs)?;
-        Ok((utxos, keymap, esplora::fee_rates(net).ok()))
+        let utxos = chain::utxos_for(net, &addrs)?;
+        Ok((utxos, keymap, chain::fee_rates(net).ok()))
     })?;
     let (utxos, keymap, rates) = loaded;
     if utxos.is_empty() {
@@ -631,7 +632,7 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
     let change_addr = parse_address(&watch.address_at(1, state.next_change)?, network)?;
     let p = plan(utxos, to, amount, rate, change_addr)?;
     spin("Verifying coins…", || {
-        esplora::verify_prevouts(net, &p.inputs)
+        chain::verify_prevouts(net, &p.inputs)
     })?;
 
     // Sanity: numbers must add up exactly.
@@ -692,7 +693,7 @@ pub fn send_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Re
     let txid = tx.compute_txid().to_string();
     let hex = bitcoin::consensus::encode::serialize_hex(&tx);
 
-    match spin("Broadcasting…", || esplora::broadcast(net, &hex)) {
+    match spin("Broadcasting…", || chain::broadcast(net, &hex)) {
         Ok(server_txid) => {
             banner();
             ok("Transaction sent");

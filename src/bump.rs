@@ -89,6 +89,12 @@ fn total_out(outputs: &[bitcoin::TxOut]) -> Result<u64, String> {
 
 /// Returns Ok(true) when a replacement was broadcast.
 pub fn bump_flow(name: &str, fp: &str, watch: &Watch, state: &WalletState) -> Result<bool, String> {
+    if crate::chain::uses_electrum() {
+        return Err(
+            "fee bumping uses the Esplora backend's transaction view; unset CAIRN_BACKEND/CAIRN_ELECTRUM or use the dashboard's send flow instead"
+                .into(),
+        );
+    }
     let network = watch.network();
     let net = esplora::net_for(network)?;
     let unit = network::unit(network);

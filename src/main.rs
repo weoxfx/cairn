@@ -1,4 +1,6 @@
 mod bump;
+mod chain;
+mod electrum;
 mod esplora;
 mod evm;
 mod evm_cli;
@@ -312,6 +314,10 @@ Environment:
   CAIRN_API=https://your-server/api          Use your own Esplora server
   CAIRN_PROXY=socks5://127.0.0.1:9050        Route API traffic through a proxy
   CAIRN_TOR=1                                Shorthand for the local Tor SOCKS port
+  CAIRN_BACKEND=electrum                     Use the Electrum protocol instead of
+                                             Esplora for balance, fees and sending
+  CAIRN_ELECTRUM=host:50002                  Electrum server (tcp://host:port for
+                                             a plaintext local node)
 
 Network:
   Mainnet is used by default for new wallets. Testnet (Testnet4, Testnet3
@@ -773,9 +779,7 @@ fn run_sync(
     gap: u32,
     prev: Option<&esplora::WalletState>,
 ) -> Result<esplora::WalletState, String> {
-    spin("Syncing with network…", || {
-        esplora::sync(watch, gap, prev)
-    })
+    spin("Syncing with network…", || chain::sync(watch, gap, prev))
 }
 
 fn dashboard(name: &str, fp: &str, watch: &Watch) -> Result<(), String> {
@@ -1154,6 +1158,7 @@ fn info_screen(fp: &str, watch: &Watch) -> Result<(), String> {
     section("Watch-only descriptors (BIP84)");
     println!();
     ui::kv("Addresses", watch.kind().label());
+    ui::kv("Network API", chain::backend_name());
     ui::kv("Receive", &style(watch.descriptor(0)?).cyan().to_string());
     ui::kv("Change", &style(watch.descriptor(1)?).cyan().to_string());
     println!();

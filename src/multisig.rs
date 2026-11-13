@@ -17,6 +17,7 @@
 //! xpubs were entered in. Every signature is checked against the BIP143 sighash
 //! before it is produced, and again before a transaction is finalized.
 
+use crate::chain;
 use crate::esplora::{self, Utxo};
 use crate::hardening;
 use crate::keystore;
@@ -1092,7 +1093,7 @@ fn scan(vault: &Vault) -> Result<Vec<Coin>, String> {
             addrs.push(a);
         }
     }
-    let utxos = esplora::utxos_for(net, &addrs)?;
+    let utxos = chain::utxos_for(net, &addrs)?;
     let mut coins = vec![];
     for utxo in utxos {
         if let Some((chain, index)) = lookup.get(&utxo.address) {
@@ -1165,7 +1166,7 @@ fn create_spend(o: &Opts) -> Result<(), String> {
         Some(r) => r.parse().map_err(|_| "--rate must be a number")?,
         None => {
             let net = esplora::net_for(network)?;
-            esplora::fee_rates(net).map(|r| r.normal).unwrap_or(2.0)
+            chain::fee_rates(net).map(|r| r.normal).unwrap_or(2.0)
         }
     };
     let change_index: u32 = o
@@ -1326,7 +1327,7 @@ fn finalize_cmd(o: &Opts) -> Result<(), String> {
     if o.has("broadcast") {
         let net = esplora::net_for(network)?;
         let hex = bitcoin::consensus::encode::serialize_hex(&tx);
-        match spin("Broadcasting…", || esplora::broadcast(net, &hex)) {
+        match spin("Broadcasting…", || chain::broadcast(net, &hex)) {
             Ok(server) => {
                 ok("Broadcast");
                 println!("  {}\n", style(server).cyan());

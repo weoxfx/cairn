@@ -5,6 +5,7 @@
 //! `--offline` never touches the network: it verifies the PSBT, shows what is
 //! being spent, asks for `SEND`, then signs with keys derived from the seed.
 
+use crate::chain;
 use crate::esplora;
 use crate::network;
 use crate::qr;
@@ -59,7 +60,7 @@ pub fn create_psbt(wallet: Option<String>, out: Option<String>) -> Result<(), St
     drop(opened);
 
     let state = spin("Syncing with network…", || {
-        esplora::sync(&watch, esplora::FULL_GAP, None)
+        chain::sync(&watch, esplora::FULL_GAP, None)
     })?;
     if state.confirmed <= 0 {
         return Err(
@@ -83,10 +84,7 @@ pub fn create_psbt(wallet: Option<String>, out: Option<String>) -> Result<(), St
         .cloned()
         .collect();
     let (utxos, rates) = spin("Loading your coins and fees…", || {
-        Ok::<_, String>((
-            esplora::utxos_for(net, &addrs)?,
-            esplora::fee_rates(net).ok(),
-        ))
+        Ok::<_, String>((chain::utxos_for(net, &addrs)?, chain::fee_rates(net).ok()))
     })?;
     if utxos.is_empty() {
         return Err("No confirmed coins found. Wait for confirmations, then Refresh.".into());
@@ -97,7 +95,7 @@ pub fn create_psbt(wallet: Option<String>, out: Option<String>) -> Result<(), St
     let change_addr = send::parse_address(&watch.address_at(1, state.next_change)?, network)?;
     let plan = send::plan(utxos, to, amount, rate, change_addr)?;
     spin("Verifying coins…", || {
-        esplora::verify_prevouts(net, &plan.inputs)
+        chain::verify_prevouts(net, &plan.inputs)
     })?;
 
     // Same invariant as the online send flow: the numbers must add up exactly.
@@ -515,7 +513,7 @@ pub fn broadcast(unsigned_path: String, signed_path: String) -> Result<(), Strin
     }
 
     let hex = bitcoin::consensus::encode::serialize_hex(&tx);
-    match spin("Broadcasting…", || esplora::broadcast(net, &hex)) {
+    match spin("Broadcasting…", || chain::broadcast(net, &hex)) {
         Ok(server_txid) => {
             banner();
             ok("Transaction sent");
