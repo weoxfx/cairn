@@ -20,9 +20,7 @@ use bitcoin::{absolute::LockTime, Address, CompressedPublicKey, Network, ScriptB
 use console::style;
 use dialoguer::Input;
 use std::collections::HashSet;
-use std::fs;
 use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 const TYPICAL_VBYTES: u64 = 141; // 1 input + 2 outputs, for fee previews
@@ -676,10 +674,7 @@ fn confirm(prompt: &str, word: &str) -> Result<bool, String> {
 }
 
 fn read_psbt(path: &str) -> Result<Psbt, String> {
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK) // no symlinks, no FIFO hangs
-        .open(path)
+    let file = crate::hardening::open_read(std::path::Path::new(path))
         .map_err(|e| format!("cannot read {path}: {e}"))?;
     if !file
         .metadata()
@@ -728,6 +723,7 @@ mod tests {
     use bitcoin::bip32::DerivationPath;
     use bitcoin::hashes::Hash;
     use bitcoin::{Amount, Txid};
+    use std::fs;
 
     const ABANDON: &str =
         "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
@@ -906,9 +902,12 @@ mod tests {
             .contains("too large"));
         assert!(read_psbt(dir.to_str().unwrap()).is_err());
 
-        let link = dir.join("link.psbt");
-        std::os::unix::fs::symlink(&bin, &link).unwrap();
-        assert!(read_psbt(link.to_str().unwrap()).is_err());
+        #[cfg(unix)]
+        {
+            let link = dir.join("link.psbt");
+            std::os::unix::fs::symlink(&bin, &link).unwrap();
+            assert!(read_psbt(link.to_str().unwrap()).is_err());
+        }
 
         let _ = fs::remove_dir_all(&dir);
     }

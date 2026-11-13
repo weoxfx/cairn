@@ -13,7 +13,6 @@ use bitcoin::{Network, Txid};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
 use std::str::FromStr;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -139,11 +138,7 @@ pub fn load_config() {
         // The config is a single network name. Refuse symlinks and special
         // files, and read through one descriptor so the checks and the read
         // cannot race with a swap.
-        let Ok(f) = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(&p)
-        else {
+        let Ok(f) = crate::hardening::open_read(&p) else {
             return;
         };
         let small = f

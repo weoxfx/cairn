@@ -582,7 +582,7 @@ pub fn fmt_sats(sats: i64) -> String {
     let digits = sats.unsigned_abs().to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push('\u{2009}');
         }
         out.push(c);
@@ -616,9 +616,15 @@ pub fn logo() {
     println!();
     for row in 0..5 {
         let line = [C[row], A[row], I[row], R[row], N[row]].join("  ");
-        println!("{MARGIN}{}", center(&style(line).cyan().bold().to_string(), w));
+        println!(
+            "{MARGIN}{}",
+            center(&style(line).cyan().bold().to_string(), w)
+        );
     }
     println!();
-    println!("{MARGIN}{}", center(&style("Bitcoin wallet").dim().to_string(), w));
+    println!(
+        "{MARGIN}{}",
+        center(&style("Bitcoin wallet").dim().to_string(), w)
+    );
     println!();
 }

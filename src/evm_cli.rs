@@ -18,7 +18,6 @@ use primitive_types::U256;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -370,10 +369,7 @@ fn store_path() -> Option<PathBuf> {
 }
 
 fn read_small(path: &Path) -> Result<String, String> {
-    let f = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
+    let f = crate::hardening::open_read(path)
         .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
     let meta = f.metadata().map_err(|e| e.to_string())?;
     if !meta.is_file() || meta.len() > MAX_FILE {
@@ -1398,7 +1394,6 @@ mod tests {
 
     #[test]
     fn transaction_files_round_trip_and_refuse_unsafe_paths() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = temp("txfile");
         let path = dir.join("tx.json");
         let p = path.to_str().unwrap();
@@ -1406,15 +1401,19 @@ mod tests {
         let read: UnsignedTx = read_json(p).unwrap();
         assert_eq!(read.to, sample().to);
         read.validate(false).unwrap();
+        #[cfg(unix)]
         assert_eq!(
-            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            crate::hardening::mode_of(&std::fs::metadata(&path).unwrap()),
             0o600
         );
 
         // A symlink is never followed.
-        let link = dir.join("link.json");
-        std::os::unix::fs::symlink(&path, &link).unwrap();
-        assert!(read_json::<UnsignedTx>(link.to_str().unwrap()).is_err());
+        #[cfg(unix)]
+        {
+            let link = dir.join("link.json");
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            assert!(read_json::<UnsignedTx>(link.to_str().unwrap()).is_err());
+        }
 
         // Junk and missing files are reported, never panicked on.
         let junk = dir.join("junk.json");

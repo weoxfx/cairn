@@ -6,7 +6,6 @@
 
 use crate::hardening;
 use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 pub struct Chain {
@@ -161,11 +160,7 @@ pub fn default_chain() -> &'static Chain {
         }
     }
     if let Some(p) = config_path() {
-        if let Ok(f) = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(&p)
-        {
+        if let Ok(f) = crate::hardening::open_read(&p) {
             let small = f
                 .metadata()
                 .map(|m| m.is_file() && m.len() <= 128)

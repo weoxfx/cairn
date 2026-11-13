@@ -14,9 +14,8 @@ use bitcoin::Network;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -420,12 +419,7 @@ pub fn save_with_passphrase(
     // keeps concurrent temp files apart.
     let tmp = path.with_extension(format!("{}.tmp", hex::encode(random_bytes::<8>()?)));
     let written = (|| -> Result<(), String> {
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)
-            .map_err(|e| e.to_string())?;
+        let mut f = crate::hardening::create_private(&tmp).map_err(|e| e.to_string())?;
         f.write_all(&json).map_err(|e| e.to_string())?;
         f.sync_all().map_err(|e| e.to_string())?;
         Ok(())
@@ -455,11 +449,7 @@ pub fn save_with_passphrase(
 /// so a planted FIFO cannot hang us) means the checks and the read act on the same
 /// file descriptor, closing the old check/read race.
 fn read_wallet_file(path: &Path) -> Result<Vec<u8>, String> {
-    let f = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|e| format!("cannot read wallet: {e}"))?;
+    let f = crate::hardening::open_read(path).map_err(|e| format!("cannot read wallet: {e}"))?;
     let meta = f
         .metadata()
         .map_err(|e| format!("cannot read wallet: {e}"))?;
@@ -469,9 +459,8 @@ fn read_wallet_file(path: &Path) -> Result<Vec<u8>, String> {
     if meta.len() > MAX_FILE_BYTES {
         return Err("wallet file is unexpectedly large".into());
     }
-    if meta.permissions().mode() & 0o077 != 0 {
-        f.set_permissions(fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
+    if crate::hardening::mode_of(&meta) & 0o077 != 0 {
+        crate::hardening::restrict(&f).map_err(|e| e.to_string())?;
     }
     let mut data = Vec::new();
     f.take(MAX_FILE_BYTES + 1)
@@ -510,7 +499,7 @@ pub fn inspect(name: &str) -> Result<FileInfo, String> {
     let dir_mode = path
         .parent()
         .and_then(|d| fs::symlink_metadata(d).ok())
-        .map(|m| m.permissions().mode() & 0o777)
+        .map(|m| crate::hardening::mode_of(&m))
         .unwrap_or(0);
     let data = read_wallet_file(&path)?;
     let ks: Keystore =
@@ -523,7 +512,7 @@ pub fn inspect(name: &str) -> Result<FileInfo, String> {
         fingerprint: ks.fingerprint,
         network: ks.network,
         size: data.len() as u64,
-        mode: before.permissions().mode() & 0o777,
+        mode: crate::hardening::mode_of(&before),
         dir_mode,
     })
 }
@@ -795,12 +784,15 @@ mod tests {
 
         // Symlinks and oversized files must be refused.
         let dir_path = wallet_dir().unwrap();
-        let link = dir_path.join("link.cairn");
-        std::os::unix::fs::symlink(&path, &link).unwrap();
-        assert!(
-            open("link", pw).is_err(),
-            "symlinked wallet must be rejected"
-        );
+        #[cfg(unix)]
+        {
+            let link = dir_path.join("link.cairn");
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            assert!(
+                open("link", pw).is_err(),
+                "symlinked wallet must be rejected"
+            );
+        }
         let big = dir_path.join("big.cairn");
         fs::write(&big, vec![b'x'; MAX_FILE_BYTES as usize + 1]).unwrap();
         assert!(

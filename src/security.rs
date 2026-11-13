@@ -317,6 +317,17 @@ fn network_check(
 }
 
 /// What this process did to keep secrets out of core dumps, ptrace and swap.
+/// Those controls are Unix kernel features, so Windows reports it as unchecked.
+#[cfg(not(unix))]
+fn memory_check() -> (Status, String) {
+    (
+        Status::Skip,
+        "not checked: core dumps and ptrace are Unix controls".into(),
+    )
+}
+
+/// What this process did to keep secrets out of core dumps, ptrace and swap.
+#[cfg(unix)]
 fn memory_check() -> (Status, String) {
     let mut core = libc::rlimit {
         rlim_cur: 0,
@@ -527,13 +538,12 @@ fn tracer_check(tracer: Option<u32>) -> (Status, String) {
 /// carries no signatures, so an installed engine is the only way to actually
 /// look for known malware.
 fn find_scanner() -> Option<(std::path::PathBuf, &'static str)> {
-    use std::os::unix::fs::PermissionsExt;
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
         for name in ["clamscan", "clamdscan"] {
             let candidate = dir.join(name);
             let executable = std::fs::metadata(&candidate)
-                .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                .map(|m| crate::hardening::is_executable(&m))
                 .unwrap_or(false);
             if executable {
                 return Some((candidate, name));
@@ -861,17 +871,16 @@ fn loader_vars_set() -> Vec<&'static str> {
 }
 
 fn path_entries() -> Vec<(String, Option<u32>)> {
-    use std::os::unix::fs::PermissionsExt;
     let Some(path) = std::env::var_os("PATH") else {
         return Vec::new();
     };
     let path = path.to_string_lossy();
-    path.split(':')
+    path.split(if cfg!(windows) { ';' } else { ':' })
         .map(|dir| {
             let mode = std::fs::metadata(dir)
                 .ok()
                 .filter(|m| m.is_dir())
-                .map(|m| m.permissions().mode());
+                .map(|m| crate::hardening::mode_of(&m));
             (dir.to_string(), mode)
         })
         .collect()

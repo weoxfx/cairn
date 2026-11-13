@@ -395,6 +395,22 @@ Apple Silicon and Intel, attaches SHA-256 checksums and creates a GitHub Release
 `MINISIGN_SECRET_KEY` repository secret is configured it also publishes a signed `SHA256SUMS`
 manifest. See [RELEASE-SIGNING.md](RELEASE-SIGNING.md) and [REPRODUCIBLE.md](REPRODUCIBLE.md).
 
+## Windows
+
+The wallet builds and runs on Windows 10 and 11, 64-bit:
+
+```powershell
+# from a release zip, no installer and no shell wrapper
+Expand-Archive cairn-v1.0.0-x86_64-pc-windows-msvc.zip -DestinationPath .
+.\cairn-v1.0.0-x86_64-pc-windows-msvc\cairn.exe --help
+```
+
+or build it yourself with `cargo build --release` and run `target\release\cairn.exe`.
+Wallets live under `%USERPROFILE%\.cairn`. Everything works the same as on Unix except the
+process-level hardening that only exists there: core-dump and ptrace locking are Unix kernel
+features, so `cairn security` reports them as unchecked instead of pretending they are set. File
+access still refuses symlinks where the platform can express that.
+
 ## Roadmap
 
 - [x] Encrypted keystore, create / import / open
@@ -414,8 +430,10 @@ manifest. See [RELEASE-SIGNING.md](RELEASE-SIGNING.md) and [REPRODUCIBLE.md](REP
 - [x] ERC-20 balances with token names and USD values, EIP-1559 offline signing and broadcast
 - [x] Interactive EVM dashboard in the same shell as the Bitcoin wallet
 - [x] RBF fee bumping for unconfirmed sends, from the dashboard
-- [ ] 2-of-3 multisig, Electrum protocol, Taproot/BIP86
-- [ ] Windows support and packaged installers
+- [x] Taproot (BIP86) wallets with schnorr key-path signing
+- [x] 2-of-3 multisig vaults coordinated through PSBT files
+- [x] Electrum protocol backend alongside Esplora
+- [x] Windows support with a packaged zip release
 
 ## License
 

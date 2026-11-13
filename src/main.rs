@@ -15,7 +15,9 @@ mod psbt_guard;
 mod qr;
 mod security;
 mod send;
-mod ui;
+// One copy of the presentation helpers: the binary renders with the library's
+// `ui` module instead of compiling a second, partially used copy under `mod ui;`.
+pub use cairn::ui;
 mod wallet;
 
 use bip39::{Language, Mnemonic};

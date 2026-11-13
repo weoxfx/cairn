@@ -31,6 +31,10 @@ jobs:
             target: aarch64-apple-darwin
             rustflags: ""
             packages: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            rustflags: ""
+            packages: ""
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7
@@ -53,10 +57,30 @@ jobs:
           export RUSTFLAGS="$MATRIX_RUSTFLAGS --remap-path-prefix=$PWD=/cairn --remap-path-prefix=$HOME/.cargo=/cargo"
           cargo build --locked --release --target "${{ matrix.target }}"
       - name: Smoke test
+        if: runner.os != 'Windows'
         run: |
           set -euo pipefail
           "./target/${{ matrix.target }}/release/cairn" --help >/dev/null
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./target/${{ matrix.target }}/release/cairn.exe --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Package release (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "cairn-$env:GITHUB_REF_NAME-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/cairn.exe" "dist/$name/cairn.exe"
+          Copy-Item README.md,SECURITY.md,LICENSE-APACHE,LICENSE-MIT "dist/$name/"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+          Remove-Item -Recurse -Force "dist/$name"
+          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "dist/$name.zip.sha256" -Value "$hash  $name.zip"
       - name: Package release
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
